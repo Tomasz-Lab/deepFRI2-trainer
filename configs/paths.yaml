@@ -1,0 +1,33 @@
+# Machine-specific locations. This is the ONLY file that should need editing when
+# moving the trainer to a different host / storage mount.
+#
+# NOTE: values containing a `{placeholder}` must be quoted -- an unquoted leading `{`
+# is a YAML flow mapping and will not parse.
+
+# Root of the deepFRI2 data tree (equivalent to the PROJECT_LOCATION env variable
+# used by FRIdata / toolbox). All `layout` templates below are relative to it, and
+# `{project_location}` below expands to it.
+project_location: /mnt/vdb2/var/storage/deepfri2
+
+# Path to the deepFRI2 inference repository `src` directory. Used only for the
+# architecture parity check: the trainer's own model definitions
+# (src/deepfri2_trainer/model.py) are diffed against the inference ones so any
+# divergence is visible. Set to null to skip that check.
+deepfri2_src: '{project_location}/production/deepFRI2/src'
+
+# Root for run outputs. Each run gets its own directory
+# `<runs_dir>/<ontology>__<model type>__<wandb run name>/`; `<runs_dir>/training.log` is a
+# single append-only log across all runs.
+runs_dir: '{project_location}/production/training/runs'
+
+# Data-tree layout, relative to `project_location`. Placeholders are filled from the
+# data config: {dataset_name}, {params}, {data_version}, {ontology}, {threshold}.
+layout:
+  # Embedding / distogram index directories (contain dataset.json, embeddings.idx, ...)
+  datasets: toolbox/data/datasets
+  # Target matrix (go_indices, protein_vectors, weights, adjacency, ...)
+  target_matrix: training/train_val_split/{dataset_name}/{params}/target_matrix
+  # train/eval split (train.tsv, eval.tsv)
+  split: training/train_val_split/{dataset_name}/{params}/mmseqs_output
+  # CAZy test-set target matrix
+  cazy_target_matrix: testing/data/testset_cazy/{data_version}/target_matrix/uniprot/{ontology}_{threshold}

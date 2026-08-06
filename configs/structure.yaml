@@ -1,0 +1,41 @@
+model_type: structure
+
+model:
+  m_diag: 60
+  m_anti: 60
+  num_diag: 30
+  num_anti: 30
+  diag_stride: 4
+  anti_stride: 4
+  diag_feats: [max, mean, topk_mean, count, argmax_r, topk_std,
+               soft_x, sigma_x, period, freq, freq_amp]
+  anti_feats: [max, mean, topk_mean, count, argmax_r, argmax_c, topk_std,
+               soft_x, soft_y, sigma_x, sigma_y, rho]
+  peak_thresh: 0.6
+  topk_k: 5
+  hidden_dim: 512
+  amp_dtype: null              # autocast dtype inside the model; null disables it (bfloat16 gives faster training, but worse GPU-CPU compatibility)
+  enforce_symmetry_diag: true
+  enforce_symmetry_anti: false
+  enforce_positivity_diag: false
+  enforce_positivity_anti: false
+  cudnn_allow_tf32: false      # cuDNN runs convolutions in TF32 by default; false causes faster training and improved GPU-CPU compatiblity
+
+training:
+  num_epochs: 20
+  learning_rate: 2.0e-4
+  metric_threshold: 0.3
+  grad_clip_max_norm: 1.0
+  use_class_weights: true
+  loss:
+    name: null                 # null selects WeightedFocalLoss(alpha=class weights)
+    kwargs: {}
+
+# Initial weights per ontology: null trains from scratch, a reference fine-tunes on top of an
+# existing checkpoint. The label space must match (loaded with strict=True).
+weights:
+  MF: {structure: null}
+  CC: {structure: null}
+  BP: {structure: null}
+
+per_ontology: {}

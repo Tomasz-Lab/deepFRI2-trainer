@@ -1,0 +1,37 @@
+# Conda environment for deepFRI2 training (GPU only).
+#
+# Requires an NVIDIA GPU with a driver supporting CUDA 12.6.
+#
+#     conda env create -f environment.yml
+#     conda activate deepfri2_trainer
+#     wandb login
+#
+# Pinned to the same versions as deepFRI2 inference (environment-gpu.yml) so a checkpoint
+# trained here behaves identically there, plus what training needs on top.
+name: deepfri2_trainer
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12.8
+  - pytorch=2.5.1=cuda126*
+  - cuda-version=12.6
+  - numpy=1.26.4
+  - pandas=2.2.3
+  - scipy=1.14.1
+  - tqdm=4.67.1
+  # training
+  - h5py=3.12.1            # embedding / distogram stores
+  - scikit-learn=1.6.0     # metric cross-checks in tests
+  - pyyaml=6.0.2           # configs
+  - matplotlib=3.10.0      # sanity plots
+  - wandb=0.19.1
+  # transformers stack: not used for training (embeddings come precomputed from FRIdata),
+  # kept so the deepFRI2 inference code imports in this environment too
+  - transformers=4.48.0
+  - huggingface_hub=0.27.1
+  - tokenizers=0.21.0
+  - safetensors=0.5.2
+  - biopython=1.85
+  - pip
+  - pip:
+      - fastobo==0.12.3    # GO graph, for the CAFA evaluation still to be wired in

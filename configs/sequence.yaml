@@ -1,0 +1,26 @@
+model_type: sequence
+
+model:
+  hidden_dim: 512
+  pooling_method: attn_light
+  attn_hidden: 64
+  attn_temperature: 2.0
+
+training:
+  num_epochs: 20
+  learning_rate: 1.0e-4
+  metric_threshold: 0.3
+  grad_clip_max_norm: 1.0
+  use_class_weights: false
+  loss:
+    name: MCMLossDAG
+    kwargs: {}
+
+# Initial weights per ontology: null trains from scratch, a reference fine-tunes on top of an
+# existing checkpoint. The label space must match (loaded with strict=True).
+weights:
+  MF: {sequence: null}
+  CC: {sequence: null}
+  BP: {sequence: null}
+
+per_ontology: {}

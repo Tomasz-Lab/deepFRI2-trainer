@@ -1,0 +1,35 @@
+# Dataset selection, shared by the sequence / structure / fusion trainings.
+# `params` (the target-matrix subdirectory) is derived as
+#   {go_version}__{ontology}__{annotation_threshold}
+
+data:
+  # FRIdata dataset version and Gene Ontology graph version
+  data_version: '20250908'
+  go_version: '20250722'
+
+  # FRIdata dataset name template; `{data_version}` is substituted at load time
+  dataset_name: 'AFDB-subset--{data_version}_HQ_ESM2'
+
+  # Suffixes appended to `dataset_name` to locate each embedding/distogram index.
+  # NOTE: the train/eval index lives in the `_over` dataset (the target matrix and
+  # the mmseqs split, however, are keyed by the plain `dataset_name`).
+  trainval_suffix: '_over'
+  testset_suffix: '_test_AF3'
+  cazyset_suffix: '_cazy_uniprot'
+
+  # Minimum number of annotations per GO term (selects the target matrix).
+  # The released deepFRI2 checkpoints use 50 for all three ontologies.
+  annotation_threshold: 50
+
+  # Sequence / distogram preprocessing (must match the inference-time settings in
+  # deepFRI2/src/deepFRI2/config.py: MAX_SEQ_LEN, SIGMA_DIST)
+  max_seq_len: 1020
+  sigma_dist: 10
+
+  # Dataloaders
+  batch_size: 32
+  num_workers: 4
+
+sanity:
+  # Protein used by the dataloader-consistency check (must be in the test set)
+  probe_protein_id: 'P30679_A'

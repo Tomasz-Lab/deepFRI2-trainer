@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# local config overrides; configs/*.yaml themselves are tracked
+configs/*.local.yaml
+.env
+
+# run outputs live under runs_dir, outside the repo, but guard anyway
+runs/
+*.pth
+*.tsv
+*.log
+wandb/

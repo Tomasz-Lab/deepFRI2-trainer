@@ -1,0 +1,42 @@
+model_type: fusion
+
+model:
+  gate_input: hidden           # 'hidden' or 'pooled'
+  gate_init_bias: -3.0
+  # The frozen sub-models are built from the architecture blocks in sequence.yaml and
+  # structure.yaml, so their hyperparameters live there.
+
+training:
+  num_epochs: 10
+  learning_rate: 2.0e-4
+  metric_threshold: 0.3
+  grad_clip_max_norm: 1.0
+  use_class_weights: false
+  loss:
+    name: MCMLossDAG
+    kwargs: {}
+
+# The frozen sub-models, per ontology. Required for a fusion-only run; when sequence /
+# structure are trained in the same call, their run names override these.
+#
+# Each reference resolves, in order, as
+#   a wandb run name       -> <runs_dir>/<ontology>__<model type>__<name>/<name>.pth
+#   a run directory name   -> <runs_dir>/<that directory>/<wandb run name>.pth
+#   a path to a .pth file  (absolute, or relative to runs_dir)
+# and must share the ontology, data version, GO version and annotation threshold of this run.
+# A reference that resolves to nothing raises, listing every path tried.
+#
+# The defaults are the released deepFRI2 run names; `python train.py --prepare` imports those
+# checkpoints into runs_dir. Override per run with --weights-sequence / --weights-structure.
+weights:
+  MF:
+    sequence: fast-dream-733
+    structure: eager-wind-756
+  CC:
+    sequence: denim-firefly-739
+    structure: stellar-elevator-757
+  BP:
+    sequence: major-dream-736
+    structure: trim-serenity-759
+
+per_ontology: {}
