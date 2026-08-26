@@ -95,6 +95,7 @@ def build_loaders(cfg: RunConfig, targets: Targets) -> Loaders:
     )
     batch_size = int(cfg.data["batch_size"])
     num_workers = int(cfg.data["num_workers"])
+    seed = cfg.seed
 
     # `DeepFRIDataset.__init__` prints "Number of proteins: N"; the label goes on the same
     # line so the three datasets are distinguishable without touching the class.
@@ -108,7 +109,7 @@ def build_loaders(cfg: RunConfig, targets: Targets) -> Loaders:
         **dataset_kwargs,
     )
     train_dataloader, eval_dataloader = create_data_loaders(
-        dataset, cfg.split_dir, batch_size=batch_size, num_workers=num_workers
+        dataset, cfg.split_dir, batch_size=batch_size, num_workers=num_workers, seed=seed
     )
 
     # --- test ---
@@ -121,7 +122,9 @@ def build_loaders(cfg: RunConfig, targets: Targets) -> Loaders:
         unfix_type="chain",  # <id>_A
         **dataset_kwargs,
     )
-    test_dataloader = create_test_loader(dataset_test, batch_size=batch_size, num_workers=num_workers)
+    test_dataloader = create_test_loader(
+        dataset_test, batch_size=batch_size, num_workers=num_workers, seed=seed
+    )
 
     # --- CAZy test ---
     print("cazy set:       ", end="")
@@ -133,7 +136,9 @@ def build_loaders(cfg: RunConfig, targets: Targets) -> Loaders:
         unfix_type="chain",
         **dataset_kwargs,
     )
-    cazy_dataloader = create_test_loader(dataset_cazy, batch_size=batch_size, num_workers=num_workers)
+    cazy_dataloader = create_test_loader(
+        dataset_cazy, batch_size=batch_size, num_workers=num_workers, seed=seed
+    )
 
     # production variant: train on train+eval
     train_loader = train_dataloader
@@ -145,6 +150,8 @@ def build_loaders(cfg: RunConfig, targets: Targets) -> Loaders:
             num_workers=num_workers,
             pin_memory=True,
             collate_fn=train_dataloader.collate_fn,
+            generator=train_dataloader.generator,
+            worker_init_fn=train_dataloader.worker_init_fn,
         )
 
     return Loaders(

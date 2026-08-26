@@ -7,6 +7,7 @@ residues.
 
 import copy
 import json
+import random
 import time
 from pathlib import Path
 
@@ -194,7 +195,22 @@ class DeepFRIDataset(torch.utils.data.Dataset):
         )
 
 
-def create_data_loaders(dataset, split_dir: Path | str, batch_size=32, num_workers=4):
+def _worker_init(worker_id: int) -> None:
+    """Give every worker a deterministic, distinct seed for python/numpy."""
+    seed = (torch.initial_seed() + worker_id) % 2**32
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def _generator(seed: int | None):
+    if seed is None:
+        return None
+    generator = torch.Generator()
+    generator.manual_seed(int(seed))
+    return generator
+
+
+def create_data_loaders(dataset, split_dir: Path | str, batch_size=32, num_workers=4, seed=None):
     """Split the dataset by the mmseqs train/eval assignment and build both loaders."""
     # TODO: should be an output of TargetMatrix
     split_dir = Path(split_dir)
@@ -225,6 +241,8 @@ def create_data_loaders(dataset, split_dir: Path | str, batch_size=32, num_worke
         # buffers in RAM indefinitely, causing steady memory growth -> swap thrashing ->
         # stall/OOM at epoch boundaries. Workers are spawned fresh per epoch instead.
         persistent_workers=False,
+        generator=_generator(seed),
+        worker_init_fn=_worker_init if seed is not None else None,
     )
 
     eval_dataloader = torch.utils.data.DataLoader(
@@ -234,12 +252,13 @@ def create_data_loaders(dataset, split_dir: Path | str, batch_size=32, num_worke
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=False,
+        worker_init_fn=_worker_init if seed is not None else None,
     )
 
     return train_dataloader, eval_dataloader
 
 
-def create_test_loader(dataset, batch_size=32, num_workers=4):
+def create_test_loader(dataset, batch_size=32, num_workers=4, seed=None):
     """Build a loader over the whole dataset."""
     test_dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -248,6 +267,8 @@ def create_test_loader(dataset, batch_size=32, num_workers=4):
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=False,
+        generator=_generator(seed),
+        worker_init_fn=_worker_init if seed is not None else None,
     )
 
     return test_dataloader

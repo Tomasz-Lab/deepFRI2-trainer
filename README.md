@@ -19,7 +19,7 @@ wandb login
 python train.py --prepare                            # once: import the released checkpoints
 python train.py --ontology MF                        # all three models
 python train.py --ontology MF --stages fusion        # just the fusion gate
-python train.py --ontology BP --train-on train+eval  # production models
+python train.py --ontology BP --train-on train+eval  # production models trained on everything
 ```
 
 A complete model is nine runs: 3 ontologies x 3 stages. `python train.py --help` lists every
@@ -120,7 +120,122 @@ python train.py --ontology MF --set training.num_epochs=5 data.batch_size=16
 
 Defaults reproduce the released checkpoints: annotation threshold 50, data version `20250908`,
 GO version `20250722`; sequence 20 epochs @ 1e-4 with `MCMLossDAG`, structure 20 epochs @ 2e-4
-with `WeightedFocalLoss` and class weights, fusion 10 epochs @ 2e-4 with `MCMLossDAG`.
+with `WeightedFocalLoss` and class weights, fusion 15 epochs @ 1e-4 with `MCMLossDAG`. The one
+deliberate departure is `selection: best` (see below). `run.sh` records the exact command for
+every released model.
+
+### Checkpoint selection
+
+Training always keeps two checkpoints — `<run>_best.pth` (the optimum of
+`training.selection_metric` so far) and `<run>_last.pth` (most recent epoch). **Those two are
+the only epochs a run can ship.** `training.selection` decides which of them becomes
+`<run>.pth` and generates the prediction TSVs:
+
+| | |
+|---|---|
+| `last` | the final epoch — what the originally released models used |
+| `best_strict` | the optimum of `training.selection_metric`, whenever it occurred |
+| `best` (default) | the final epoch when it is within `selection_tolerance` of the optimum, the optimum otherwise |
+
+Both files survive the run, and `config_<run>.yaml` records the shipped epoch
+(`provenance.selected_epoch`, `provenance.selected_checkpoint`), so the other option can be
+evaluated without retraining.
+
+Because only those two epochs exist on disk, `select_epoch()` returns the epoch **and** the
+checkpoint that holds it, and the caller loads the file it names — the epoch number alone is not
+enough to identify a checkpoint.
+
+**Selection needs a held-out split.** Under `--train-on train+eval` the eval split is part of
+the training set, so `eval_fmax` and `eval_loss` are training metrics: they tend to improve
+monotonically, `_best.pth` ends up equal to `_last.pth`, and every rule resolves to the final
+epoch regardless of what the config asks for. Such a run is effectively `selection: last`, and
+its `eval_*` numbers are not held out — judge it on the test / CAZy sets instead.
+
+This makes a train-only vs train+eval comparison asymmetric: the train-only run can ship the
+optimum of a noisy held-out curve, the train+eval run always ships its final epoch, and the
+difference between those two is not a difference in training data. To compare the two fairly,
+either hold out a slice for selection (train on `train` plus most of `eval`, select on the
+remainder) or fix `num_epochs` from the train-only run's curve and set `selection: last` on both
+sides.
+
+### Which metric to select on
+
+`training.selection_metric` is `eval_fmax` by default: the **protein-centric Fmax on the eval
+split, with GO-DAG propagation** — the CAFA metric itself, computed in-loop. It tracks the
+offline CAFA evaluation closely, up to a constant offset from the label space (the offline
+evaluation uses the full GO graph, the in-loop one the run's target-matrix terms); differences
+between epochs and between models are unaffected.
+
+The alternatives disagree with each other and with CAFA, which is why the choice matters. Within
+a single run, eval **loss** can bottom out many epochs before Fmax peaks, while macro and micro
+F1 at a fixed threshold peak at different epochs again. Loss is a proper scoring rule, so it
+punishes the overconfidence that sets in once a model starts memorising — but Fmax maximises over
+the threshold and so ignores calibration entirely. Macro F1 at a fixed threshold keeps rising
+because macro recall keeps rising as the model starts firing on rare terms, each weighted
+equally; micro F1 falls at the same time because the bulk of predictions is degrading. None of
+them is CAFA. Fmax is.
+
+`selection_metric: eval_loss` is available if you want the conservative criterion.
+
+`training.selection_tolerance` (default 0.002) keeps the **final** epoch when it is no more
+than that below the optimum. Fmax wobbles by a few thousandths between epochs, and without it a
+run can stop on an early lucky epoch while the model is still improving; the more-trained
+checkpoint is the safer one inside the noise band. Once the drop exceeds the tolerance the
+optimum wins. `best_strict` ignores the tolerance and always keeps the optimum; `last` ignores
+it and always keeps the final epoch.
+
+In practice most runs end with the curve flat or still rising, so `best` and `last` agree and the
+tolerance changes nothing. The two differ only when the curve genuinely turns down by more than
+the noise before the end. `best` and `best_strict` differ in the opposite case: on a flat curve
+with an early wobble at the top, `best_strict` will ship that early epoch, which is exactly the
+noise-chasing the tolerance exists to prevent — so prefer `best` unless you specifically want the
+optimum irrespective of when it occurred.
+
+Train Fmax is computed too, on a fixed subsample (`fmax_max_proteins`, default 10 000 proteins —
+propagating the full train split every epoch would cost gigabytes). Both series are logged, and
+each run reports how well they track each other:
+
+```
+  Fmax  train vs eval: pearson=+0.671 spearman=+0.643
+  loss  train vs eval: pearson=-0.818 spearman=-0.738
+```
+
+A high correlation means the model is still learning structure that generalises; once the two
+diverge, later epochs are only fitting the train split.
+
+This matters more than it looks. Eval loss bottoms out well before the last epoch — earlier at
+higher learning rates — while training runs to `num_epochs` regardless. In-distribution metrics
+(eval, test) barely notice; an out-of-distribution set such as CAZy does: a model left well past
+its optimum assigns lower scores to its *true* labels and its optimal threshold drifts downwards,
+both of which cost more off-distribution than on.
+
+Set `selection: last` to ship the final epoch regardless, or `best_strict` to ship the optimum
+regardless of when it occurred.
+
+### Seeding and reproducibility
+
+`training.seed` (default 42) seeds python, numpy and torch, and the dataloaders' shuffling and
+workers, so weight init and batch order are reproducible. `null` draws a seed instead and records
+it in `config_<run>.yaml`, so an unpinned run is still reproducible after the fact.
+
+The seed fixes the *inputs* to training, not how the GPU executes it. GPU libraries choose
+kernels and accumulation orders from heuristics that depend on tensor shapes and on the hardware,
+and some backward kernels accumulate in a non-fixed order, so two runs of the same config on the
+same machine can differ in the last decimals of each update. Over a long run those differences
+compound, and two runs of one recipe land on slightly different models — close in behaviour, not
+identical in weights. Expect a spread of a few thousandths in Fmax between repeats of the same
+configuration, and treat differences of that size between two single runs as noise rather than
+signal. Where a comparison matters, repeat it across seeds and compare the spread, or evaluate
+with confidence intervals over proteins.
+
+Worth knowing: this is easy to under-estimate from a short run. A few batches per epoch can
+reproduce exactly while a full epoch of the same config does not, so reproducibility should be
+checked at realistic run length if you check it at all.
+
+Runs on different GPUs or different CUDA / cuDNN / torch builds are not comparable at this
+resolution regardless of seeding. `provenance.machine` in `config_<run>.yaml` records host, GPU,
+capability, driver, CUDA, cuDNN and python version so a run record can answer whether two runs
+shared a stack.
 
 ### `weights`: initial checkpoints and frozen sub-models
 
@@ -136,7 +251,7 @@ Override per run instead of editing the configs:
 ```bash
 python train.py --ontology CC --stages fusion \
     --weights-sequence wandb-name-1 --weights-structure wandb-name-2
-python train.py --ontology MF --stages structure --weights-structure eager-wind-756
+python train.py --ontology MF --stages structure --weights-structure wandb-name-3
 ```
 
 When `sequence` / `structure` are trained in the same call, their run names are passed to the
@@ -147,9 +262,9 @@ A reference resolves, in order, as a **wandb run name** (→
 to a `.pth`**. One that resolves to nothing raises, listing every path tried:
 
 ```
-FileNotFoundError: sequence weights 'denim-firefly-739' not found for CC; looked for:
-  <runs_dir>/CC__sequence__denim-firefly-739/denim-firefly-739.pth
-  <runs_dir>/denim-firefly-739/denim-firefly-739.pth
+FileNotFoundError: sequence weights 'wandb-name-1' not found for CC; looked for:
+  <runs_dir>/CC__sequence__wandb-name-1/wandb-name-1.pth
+  <runs_dir>/wandb-name-1/wandb-name-1.pth
 Train it first, run `python train.py --prepare` to import the released deepFRI2 checkpoints, ...
 ```
 
@@ -161,9 +276,9 @@ Train it first, run `python train.py --prepare` to import the released deepFRI2 
 directories:
 
 ```
-<runs_dir>/MF__sequence__fast-dream-733/
-    fast-dream-733.pth
-    config_fast-dream-733.yaml     provenance: imported, not trained here
+<runs_dir>/MF__sequence__<run>/
+    <run>.pth
+    config_<run>.yaml              provenance: imported, not trained here
 ```
 
 That makes "fine-tune on top of the released model" and "train a fusion gate over the released
@@ -196,13 +311,13 @@ hyperparameter — and is carried in every file name so files stay identifiable 
 ```
 <runs_dir>/
     training.log                                  append-only, shared by all runs
-    MF__sequence__expert-surf-758/
-        expert-surf-758.pth                       state dict, loadable by deepFRI2 inference
-        labels_expert-surf-758.json               {"<column index>": "<GO term>"}
-        config_expert-surf-758.yaml               merged config + provenance + parity verdict
-        predictions_expert-surf-758.tsv           eval-set predictions
-        predictions_test_expert-surf-758.tsv
-        predictions_cazy_expert-surf-758.tsv
+    MF__sequence__<run>/
+        <run>.pth                                 state dict, loadable by deepFRI2 inference
+        labels_<run>.json                         {"<column index>": "<GO term>"}
+        config_<run>.yaml                         merged config + provenance + parity verdict
+        predictions_<run>.tsv                     eval-set predictions
+        predictions_test_<run>.tsv
+        predictions_cazy_<run>.tsv
         architecture_parity.diff                  only when the architectures diverged
         log.txt                                   this run's console output
         source/                                   the code that produced the run
@@ -210,13 +325,15 @@ hyperparameter — and is carried in every file name so files stay identifiable 
 
 `config_<run>.yaml` holds the merged config plus provenance: wandb run name, timestamp, trainer
 and deepFRI2 git commits (`-dirty` when the checkout has local changes), torch version, TF32
-flags, the model's `ARCHITECTURE` dict and the parity report. `source/` snapshots `model.py`,
+flags, the machine the run executed on (`provenance.machine`), the shipped epoch and checkpoint,
+the model's `ARCHITECTURE` dict and the parity report. `source/` snapshots `model.py`,
 `load_model.py`, `data.py`, `train.py`, `pipeline.py`, `dataloader.py`, `training.py` and
 `losses.py`. Config and snapshot are also logged to wandb as a `code` artifact.
 
 `log.txt` is the run's console output, captured from the start of the stage and flushed once the
-run directory name is known, so nothing printed before `wandb.init` is lost. Progress-bar
-repaints and escape codes are stripped. The tee is re-installed at that point, because
+run directory name is known, so nothing printed before `wandb.init` is lost. stdout is kept
+verbatim; stderr — where tqdm draws — is cleaned of progress artefacts: carriage-return
+repaints, escape codes, and the bare newlines `tqdm.moveto` emits to reposition nested bars. The tee is re-installed at that point, because
 `wandb.init` swaps `sys.stdout` and `wandb.finish` restores the stream *it* saved — across
 several stages in one process that would otherwise send every stage after the first into the
 first stage's log. The cross-stage summary is appended to the last stage's log.
@@ -224,8 +341,8 @@ first stage's log. The cross-stage summary is appended to the last stage's log.
 `training.log` brackets every run:
 
 ```
-2026-08-05 10:34 | START  | MF__sequence__expert-surf-758 | num_labels=858 epochs=20 lr=0.0001 loss=MCMLossDAG train_on=train train_batches=2350 parity=identical
-2026-08-05 11:58 | DONE   | MF__sequence__expert-surf-758 | train_loss=0.0421 eval_loss=0.0455 eval_f1=0.4123 dir=...
+<date> 10:34 | START  | MF__sequence__<run> | num_labels=... epochs=20 lr=0.0001 loss=MCMLossDAG train_on=train train_batches=... parity=identical
+<date> 11:58 | DONE   | MF__sequence__<run> | epoch=<shipped>/20 checkpoint=<run>_best.pth optimum_epoch=... selection=best train_on=train seed=42 train_loss=... eval_loss=... eval_fmax=... time=... per_epoch=... dir=...
 ```
 
 A run that raises during training is recorded as `FAILED`. Training all three stages yields

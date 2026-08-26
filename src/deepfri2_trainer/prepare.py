@@ -4,10 +4,10 @@
 (``deepFRI2/src/deepFRI2/config.py :: MODEL_NAMES``, weights under
 ``deepFRI2/params/<ontology>/``) into run directories of the usual shape::
 
-    <runs_dir>/MF__sequence__fast-dream-733/
-        fast-dream-733.pth
-        labels_fast-dream-733.json      (when the release ships one)
-        config_fast-dream-733.yaml      provenance: imported, not trained here
+    <runs_dir>/MF__sequence__<run>/
+        <run>.pth
+        labels_<run>.json               (when the release ships one)
+        config_<run>.yaml               provenance: imported, not trained here
 
 They are then usable like any trained run, in particular as the frozen sub-models of a fusion
 training -- what ``configs/fusion.yaml`` refers to by default. They have no prediction TSVs, so

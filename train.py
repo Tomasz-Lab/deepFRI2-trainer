@@ -27,7 +27,7 @@ Parameters
     `<runs_dir>/<ontology>__<model type>__<name>/`), a run directory name, or a .pth path:
         python train.py --ontology CC --stages fusion \\
             --weights-sequence wandb-name-1 --weights-structure wandb-name-2
-        python train.py --ontology MF --stages structure --weights-structure eager-wind-756
+        python train.py --ontology MF --stages structure --weights-structure wandb-name-3
     Ignored for sub-models trained in the same call (those win).
 --prepare
     Import the released deepFRI2 checkpoints into `runs_dir` and exit. Reads the run names from
@@ -39,7 +39,8 @@ Parameters
 --train-on {train,train+eval}
     `train` (default) evaluates on the held-out eval split. `train+eval` trains on the union of
     both, as the released production models were trained; the eval metrics then include
-    training data and are optimistic.
+    training data and are optimistic. With no held-out split left, `training.selection` has no
+    signal to act on and the run ships its final epoch whatever the config says.
 --device DEVICE
     Torch device, default `cuda:0`.
 --no-wandb
@@ -47,8 +48,11 @@ Parameters
 --config-dir DIR
     Alternative directory of YAML configs (default `<repo>/configs`).
 --set KEY=VALUE [...]
-    Config overrides, dotted keys into the merged config, values parsed as YAML.
-    Example: `--set training.num_epochs=5 data.batch_size=16`.
+    Config overrides, dotted keys into the merged config, values parsed as YAML. Repeatable,
+    and accepts several assignments per flag; both forms below are equivalent:
+        --set training.num_epochs=5 training.learning_rate=2.0e-4
+        --set training.num_epochs=5 --set training.learning_rate=2.0e-4
+    The applied overrides are echoed at startup.
 --no-parity-check
     Skip comparing `src/deepfri2_trainer/model.py` against the deepFRI2 inference model
     definitions. Skip it only when no deepFRI2 checkout is around.
@@ -69,6 +73,9 @@ the wandb run name:
     predictions_<run name>.tsv      eval-set predictions
     predictions_test_<run name>.tsv
     predictions_cazy_<run name>.tsv
+    <run name>_best.pth             optimum of selection_metric } training.selection picks which
+    <run name>_last.pth             final epoch                 } becomes <run name>.pth
+                                    (selection: last | best_strict | best)
     architecture_parity.diff        only when the architectures have diverged
     log.txt                         this run's console output
     source/                         snapshot of the code that produced the run
@@ -137,8 +144,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:0", help="torch device")
     parser.add_argument("--no-wandb", action="store_true", help="disable wandb logging")
     parser.add_argument("--config-dir", default=None, help="alternative configs/ directory")
-    parser.add_argument("--set", nargs="+", default=[], metavar="KEY=VALUE", dest="overrides",
-                        help="config overrides, e.g. training.num_epochs=5")
+    # action="extend": with plain nargs="+", a repeated --set OVERWRITES the previous one, so
+    # `--set a=1 --set b=2` silently dropped a=1. default=None avoids argparse's shared-mutable
+    # -default trap.
+    parser.add_argument("--set", nargs="+", action="extend", default=None, metavar="KEY=VALUE",
+                        dest="overrides",
+                        help="config overrides; repeatable, e.g. --set training.num_epochs=5 "
+                             "--set data.batch_size=16")
     parser.add_argument("--weights-sequence", default=None, metavar="NAME",
                         help="sequence checkpoint: frozen sub-model (fusion run) or fine-tuning "
                              "starting point (sequence run)")
@@ -160,6 +172,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     overrides = _parse_overrides(args.overrides)
+    if overrides:
+        print(f"config overrides: {overrides}")
 
     if args.prepare:
         prepare_released_runs(

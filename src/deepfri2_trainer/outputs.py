@@ -5,6 +5,8 @@ identifiable when copied out of the run directory::
 
     <runs_dir>/<ontology>__<model type>__<run name>/
         <run name>.pth                    state dict, loadable by deepFRI2 inference
+    <run name>_best.pth               lowest-eval-loss epoch
+    <run name>_last.pth               final epoch
         labels_<run name>.json            {"<column index>": "<GO term>"}
         config_<run name>.yaml            merged config + provenance (git commits, parity)
         predictions_<run name>.tsv        eval-set predictions
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import io
 import json
+import platform
 import re
 import shutil
 import subprocess
@@ -42,13 +45,12 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def _for_log(text: str) -> str:
-    """Drop progress-bar repaints and escape codes; keep everything else verbatim."""
+    """Clean up a progress stream for the log file.
+    """
     if "\r" in text:
         return ""
     stripped = _ANSI.sub("", text)
-    # A write that was nothing but cursor movement (tqdm's nested-bar repaints) leaves only
-    # whitespace behind; keeping it would fill the log with blank lines.
-    return "" if (stripped != text and not stripped.strip()) else stripped
+    return "" if not stripped.strip() else stripped
 
 #: Snapshotted into every run: everything that determines what was trained.
 SOURCE_FILES = (
@@ -131,6 +133,8 @@ class _Sink:
 class RunLogger:
     """Tee the console output of a run into ``<run_dir>/log.txt``.
 
+    stdout is captured verbatim; stderr is cleaned of progress-bar artefacts.
+
     The run directory is only known once the wandb run exists, so output is buffered from the
     start of the stage and flushed by :meth:`attach`.
 
@@ -151,8 +155,8 @@ class RunLogger:
         for tee in self._tees:
             tee.mute()
         self._saved = (sys.stdout, sys.stderr)
-        sys.stdout = _Tee(sys.stdout, self._sink, strip_progress=True)
-        sys.stderr = _Tee(sys.stderr, self._sink, strip_progress=True)
+        sys.stdout = _Tee(sys.stdout, self._sink)                        # verbatim
+        sys.stderr = _Tee(sys.stderr, self._sink, strip_progress=True)   # tqdm draws here
         self._tees.extend([sys.stdout, sys.stderr])
 
     def __enter__(self) -> RunLogger:
@@ -223,6 +227,40 @@ def git_commit(repo: Path | str) -> str | None:
         return None
 
 
+def _nvidia_driver_version() -> str | None:
+    """Driver version from nvidia-smi; None when it is not callable."""
+    try:
+        return subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True, text=True, check=True, timeout=10,
+        ).stdout.strip().splitlines()[0]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def machine() -> dict:
+    """The hardware and library stack a run executed on.
+
+    GPU kernels are chosen per architecture and library version, so two runs that agree on
+    config, seed and source snapshot can still differ slightly if they ran on different
+    hardware or library builds. Recording the stack lets a run record answer whether two runs
+    were comparable in the first place.
+    """
+    info: dict[str, object] = {
+        "host": platform.node(),
+        "python": platform.python_version(),
+        "cuda": torch.version.cuda,
+        "cudnn": torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else None,
+    }
+    if torch.cuda.is_available():
+        index = torch.cuda.current_device()
+        info["gpu"] = torch.cuda.get_device_name(index)
+        info["gpu_capability"] = ".".join(str(x) for x in torch.cuda.get_device_capability(index))
+        info["gpu_count"] = torch.cuda.device_count()
+        info["driver"] = _nvidia_driver_version()
+    return info
+
+
 def provenance(cfg: RunConfig, model: nn.Module | None = None, **extra) -> dict:
     """Everything about a run that is not part of the config itself."""
     info = {
@@ -235,6 +273,7 @@ def provenance(cfg: RunConfig, model: nn.Module | None = None, **extra) -> dict:
             "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
             "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
         },
+        "machine": machine(),
         **extra,
     }
     if model is not None:
@@ -384,6 +423,29 @@ def log_run_artifacts(cfg: RunConfig, extra_files: tuple[Path, ...] = ()) -> Non
             artifact.add_file(str(path))
     wandb.run.log_artifact(artifact)
     print(f"logged wandb artifact: run-{cfg.run_name} (config + source snapshot)")
+
+
+def log_selection(cfg: RunConfig, selected: dict, total_epochs: int, checkpoint: str = "last",
+                  log_wandb: bool = True, timings: dict | None = None) -> None:
+    """Record which epoch the run shipped, and from which checkpoint, in the wandb summary."""
+    import wandb  # noqa: PLC0415
+
+    if not log_wandb or wandb.run is None:
+        return
+    wandb.run.summary["selected_epoch"] = selected["epoch"]
+    wandb.run.summary["selected_checkpoint"] = cfg.candidate_checkpoint_path(checkpoint).name
+    wandb.run.summary["selected_eval_loss"] = selected["eval_loss"]
+    wandb.run.summary["selected_eval_fmax"] = selected.get("eval_fmax")
+    wandb.run.summary["selection"] = cfg.selection
+    wandb.run.summary["selection_metric"] = cfg.selection_metric
+    wandb.run.summary["train_on"] = cfg.train_on
+    # train+eval trains on the eval split, so these are training numbers, not held out.
+    wandb.run.summary["eval_is_held_out"] = cfg.train_on == "train"
+    wandb.run.summary["total_epochs"] = total_epochs
+    wandb.run.summary["seed"] = cfg.seed
+    for key in ("training_seconds", "seconds_per_epoch", "stage_seconds"):
+        if key in (timings or {}):
+            wandb.run.summary[key] = timings[key]
 
 
 def append_training_log(cfg: RunConfig, event: str, **fields) -> Path:

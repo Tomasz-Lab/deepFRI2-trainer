@@ -9,7 +9,33 @@ model:
 training:
   num_epochs: 20
   learning_rate: 1.0e-4
-  metric_threshold: 0.3
+  metric_threshold: 0.3   # used only for reporting train/eval p/r/f1
+  # Training keeps two checkpoints: <run>_best.pth (the optimum of selection_metric so far) and
+  # <run>_last.pth (most recent epoch). `selection` picks which becomes <run>.pth and produces
+  # the predictions -- those two are the ONLY epochs a run can ship.
+  #   last        the final epoch; what the originally released models used.
+  #   best_strict the optimum of selection_metric, whenever it occurred.
+  #   best        the final epoch if it is within selection_tolerance of the optimum, else the
+  #               optimum. Prefers the later, more-trained checkpoint inside the noise band.
+  # Eval loss bottoms out well before the final epoch and out-of-distribution sets such as CAZy
+  # degrade past that point, so the choice is real.
+  # NOTE: with --train-on train+eval the eval split is part of the training set, so every
+  # selection_metric is a training metric, rises monotonically, and all three rules collapse to
+  # `last`. Selection needs a held-out split to mean anything.
+  selection: best
+  # What `best` means. eval_fmax is the protein-centric Fmax on the eval split with GO-DAG
+  # propagation -- the CAFA metric itself, and a near-exact proxy for the benchmark. eval_loss
+  # is calibration-sensitive and turns up several epochs earlier than Fmax peaks.
+  selection_metric: eval_fmax
+  # Fmax wobbles by a few thousandths between epochs. With `selection: best`, keep the final
+  # epoch when it is no more than this below the optimum, so a lucky early epoch does not cut
+  # training short. Ignored by `best_strict` and `last`.
+  selection_tolerance: 0.002
+  # Proteins sampled (fixed subsample) for the train/eval Fmax; the full train split would cost
+  # gigabytes to propagate every epoch.
+  fmax_max_proteins: 10000
+  # Seeds weight init and batch order. null draws one and records it in config_<run>.yaml.
+  seed: 42
   grad_clip_max_norm: 1.0
   use_class_weights: false
   loss:

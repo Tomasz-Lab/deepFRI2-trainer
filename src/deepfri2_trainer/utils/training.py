@@ -6,6 +6,10 @@ code that produced the released checkpoints. ``wandb.init`` lives in
 session must be open before training begins; per-epoch metric logging still happens here.
 """
 
+import os
+import random
+import time
+
 import numpy as np
 import torch
 import torch.optim as optim
@@ -14,6 +18,33 @@ import wandb
 from scipy.special import expit as sigmoid
 
 from .losses import MCMLossDAG, WeightedFocalLoss
+
+
+def format_duration(seconds: float) -> str:
+    """``1:23:45`` / ``4m11s`` / ``12s`` -- readable at every scale a run spans."""
+    seconds = float(seconds)
+    if seconds >= 3600:
+        return f"{int(seconds // 3600)}:{int(seconds % 3600 // 60):02d}:{int(seconds % 60):02d}"
+    if seconds >= 60:
+        return f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
+    return f"{seconds:.0f}s"
+
+
+def seed_everything(seed: int) -> int:
+    """Seed python, numpy and torch, and return the seed.
+
+    Makes weight initialisation and batch order reproducible. It does not fix how the GPU
+    executes the run: kernel and accumulation-order choices are left to the libraries, so two
+    runs of one config on one machine can still differ in the last decimals of each update and
+    end up as slightly different models. See the README for what that costs in practice.
+    """
+    seed = int(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    return seed
 
 
 def count_trainable_parameters(model):
@@ -254,6 +285,52 @@ def calculate_metrics(predictions, targets, threshold=0.3):
     )
 
 
+def calculate_fmax(predictions, targets, propagate=None, steps: int = 51,
+                   max_proteins: int | None = None, seed: int = 0):
+    """Protein-centric Fmax -- the CAFA metric, computed on the eval split.
+
+    For each threshold: precision averaged over proteins with at least one prediction, recall
+    averaged over all proteins, F = 2PR/(P+R); the maximum over thresholds is returned with the
+    threshold that achieved it.
+
+    Unlike the loss it is insensitive to calibration (only the ranking and the best threshold
+    matter), and unlike macro/micro F1 at a fixed threshold it is protein-centric. With
+    ``propagate`` (a :class:`~deepfri2_trainer.utils.losses.DAGPropagator`) this reproduces the
+    between-model differences of the real CAFA evaluation.
+
+    ``max_proteins`` subsamples the rows with a fixed seed, so the estimate is comparable
+    across epochs. It exists for the train split: propagating all probabilities every
+    epoch would cost gigabytes, while a fixed 10k-protein sample costs the same as eval.
+    """
+    if max_proteins is not None and predictions.shape[0] > max_proteins:
+        rows = np.random.default_rng(seed).choice(
+            predictions.shape[0], size=max_proteins, replace=False
+        )
+        predictions, targets = predictions[rows], targets[rows]
+
+    probabilities = sigmoid(predictions)
+    if propagate is not None:
+        probabilities = propagate(probabilities)
+    truth = targets.astype(bool)
+    support = np.maximum(truth.sum(axis=1), 1)
+
+    best_f, best_threshold = 0.0, 0.0
+    for threshold in np.linspace(0.01, 0.99, steps):
+        predicted = probabilities >= threshold
+        n_predicted = predicted.sum(axis=1)
+        covered = n_predicted > 0
+        if not covered.any():
+            continue
+        true_positives = (predicted & truth).sum(axis=1)
+        precision = (true_positives[covered] / n_predicted[covered]).mean()
+        recall = (true_positives / support).mean()
+        if precision + recall > 0:
+            f = 2 * precision * recall / (precision + recall)
+            if f > best_f:
+                best_f, best_threshold = float(f), float(threshold)
+    return best_f, best_threshold
+
+
 def log_metrics(
     train_loss,
     eval_loss,
@@ -265,6 +342,9 @@ def log_metrics(
     prfs_eval,
     epoch,
     log_wandb=True,
+    eval_fmax=None,
+    train_fmax=None,
+    seconds=None,
 ):
     """Log metrics to console and wandb if enabled."""
     metrics = {
@@ -287,12 +367,25 @@ def log_metrics(
         for key, value in (prfs[3] or {}).items():
             metrics[f"{split}/{key}"] = value
 
+    if eval_fmax is not None:
+        metrics["eval/fmax"], metrics["eval/fmax_threshold"] = eval_fmax
+    if train_fmax is not None:
+        metrics["train/fmax"], metrics["train/fmax_threshold"] = train_fmax
+    if seconds is not None:
+        metrics["epoch_seconds"] = seconds
+
     if log_wandb:
         wandb.log(metrics, step=epoch + 1)
 
-    print(f"Epoch {epoch + 1}")
+    print(f"Epoch {epoch + 1}" + (f"  [{format_duration(seconds)}]" if seconds else ""))
     print(f"Train - Loss: {train_loss:.4f}")
     print(f"Eval  - Loss: {eval_loss:.4f}")
+    if eval_fmax is not None:
+        train_part = f"  train {train_fmax[0]:.4f}" if train_fmax is not None else ""
+        print(
+            f"Eval  - Fmax : {eval_fmax[0]:.4f} (tau={eval_fmax[1]:.2f})  <- CAFA proxy"
+            f"{train_part}"
+        )
     for split, prfs in (("Train", prfs_train), ("Eval ", prfs_eval)):
         extras = prfs[3] or {}
         print(
@@ -321,6 +414,9 @@ def train_model(
     loss_fn_kwargs=None,
     grad_clip_max_norm: float | None = 1.0,
     max_steps_per_epoch: int | None = None,
+    on_epoch_end=None,
+    propagate=None,
+    fmax_max_proteins: int | None = 10_000,
 ):
     """
     Universal training function that can use embeddings, distograms, or both.
@@ -337,9 +433,14 @@ def train_model(
         log_wandb: Whether to log per-epoch metrics to the active wandb run
         grad_clip_max_norm: Per-step gradient clipping max norm
         max_steps_per_epoch: Optional cap on train/eval batches per epoch (smoke tests)
+        on_epoch_end: Optional ``callback(epoch, model, record)`` run after every epoch, where
+            ``record`` holds that epoch's losses and metrics. Used to checkpoint each epoch.
+        propagate: Optional DAG propagator; enables the protein-centric train/eval Fmax.
+        fmax_max_proteins: Cap on proteins used for Fmax (fixed subsample, comparable across
+            epochs); keeps the train-split Fmax affordable.
 
     Returns:
-        Trained model and evaluation metrics
+        Trained model and evaluation metrics, including ``history``: one record per epoch.
     """
     device = next(model.parameters()).device
 
@@ -351,10 +452,13 @@ def train_model(
         loss_fn_kwargs=loss_fn_kwargs,
     )
     total_epochs = max(1, int(num_epochs))
+    history: list[dict] = []
+    training_started = time.perf_counter()
 
     # Training loop
     with tqdm.trange(total_epochs, desc="Training") as pbar:
         for epoch in pbar:
+            epoch_started = time.perf_counter()
             train_loss, all_predictions, all_targets = train_epoch(
                 model,
                 train_dataloader,
@@ -380,6 +484,12 @@ def train_model(
 
             prfs_train = calculate_metrics(all_predictions, all_targets, threshold)
             prfs_eval = calculate_metrics(eval_predictions, eval_targets, threshold)
+            eval_fmax = calculate_fmax(
+                eval_predictions, eval_targets, propagate, max_proteins=fmax_max_proteins
+            )
+            train_fmax = calculate_fmax(
+                all_predictions, all_targets, propagate, max_proteins=fmax_max_proteins
+            )
 
             log_metrics(
                 train_loss,
@@ -392,9 +502,34 @@ def train_model(
                 prfs_eval,
                 epoch,
                 log_wandb,
+                eval_fmax=eval_fmax,
+                train_fmax=train_fmax,
+                seconds=time.perf_counter() - epoch_started,
             )
 
+            record = {
+                "epoch": epoch + 1,
+                "seconds": time.perf_counter() - epoch_started,
+                "train_loss": train_loss,
+                "eval_loss": eval_loss,
+                "train_metrics": prfs_train,
+                "eval_metrics": prfs_eval,
+                "eval_fmax": eval_fmax[0],
+                "eval_fmax_threshold": eval_fmax[1],
+                "train_fmax": train_fmax[0],
+            }
+            history.append(record)
+            if on_epoch_end is not None:
+                on_epoch_end(epoch + 1, model, record)
+
+    elapsed = time.perf_counter() - training_started
+    per_epoch = elapsed / max(1, len(history))
+    print(f"training time: {format_duration(elapsed)} total, {format_duration(per_epoch)} per epoch")
+
     return model, {
+        "history": history,
+        "training_seconds": elapsed,
+        "seconds_per_epoch": per_epoch,
         "train_loss": train_loss,
         "eval_loss": eval_loss,
         "train_metrics": prfs_train,

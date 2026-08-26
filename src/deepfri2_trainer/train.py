@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from .config import RunConfig
 from .data import Loaders, Targets
+from .utils.losses import DAGPropagator
 from .utils.training import count_trainable_parameters, train_model
 
 
@@ -41,6 +42,7 @@ def run_training(
     targets: Targets,
     log_wandb: bool = True,
     max_steps_per_epoch: int | None = None,
+    on_epoch_end=None,
 ):
     """Train ``model`` following the configuration; returns ``(model, metrics)``.
 
@@ -51,6 +53,8 @@ def run_training(
     print(f"trainable parameters: {count_trainable_parameters(model):,}")
 
     loss_args = build_loss_kwargs(cfg, targets, device)
+    # Propagating eval predictions up the GO DAG before Fmax computation
+    propagate = DAGPropagator(targets.adjacency)
 
     return train_model(
         model=model,
@@ -64,5 +68,8 @@ def run_training(
         grad_clip_max_norm=cfg.training["grad_clip_max_norm"],
         max_steps_per_epoch=max_steps_per_epoch,
         log_wandb=log_wandb,
+        on_epoch_end=on_epoch_end,
+        propagate=propagate,
+        fmax_max_proteins=cfg.training.get("fmax_max_proteins", 10_000),
         **loss_args,
     )

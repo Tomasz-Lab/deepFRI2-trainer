@@ -16,11 +16,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import torch
 import yaml
 
 ONTOLOGIES = ("MF", "CC", "BP")
 MODEL_TYPES = ("sequence", "structure", "fusion")
 TRAIN_ON = ("train", "train+eval")
+SELECTIONS = ("best", "best_strict", "last")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "configs"
@@ -71,6 +73,46 @@ class RunConfig:
     @property
     def training(self) -> dict:
         return self.raw.get("training", {})
+
+    @property
+    def selection(self) -> str:
+        """Which epoch's weights become the run's checkpoint.
+
+        Only two epochs are ever kept on disk -- the optimum of ``selection_metric`` so far
+        (``<run>_best.pth``) and the most recent one (``<run>_last.pth``) -- so those are the
+        only two a run can ship.
+
+        ``last``        the final epoch; reproduces the originally released models.
+        ``best_strict`` the optimum of ``selection_metric``, whenever it occurred.
+        ``best``        the final epoch when it is within ``selection_tolerance`` of the
+                        optimum, the optimum otherwise. Prefers the later checkpoint when the
+                        difference is within the epoch-to-epoch noise.
+        """
+        selection = str(self.training.get("selection", "best"))
+        if selection not in SELECTIONS:
+            raise ValueError(
+                f"training.selection must be one of {SELECTIONS}, got {selection!r}"
+            )
+        return selection
+
+    @property
+    def selection_metric(self) -> str:
+        """What ``best`` means: ``eval_fmax`` (maximise) or ``eval_loss`` (minimise)."""
+        metric = str(self.training.get("selection_metric", "eval_fmax"))
+        if metric not in ("eval_fmax", "eval_loss"):
+            raise ValueError(
+                f"training.selection_metric must be 'eval_fmax' or 'eval_loss', got {metric!r}"
+            )
+        return metric
+
+    @property
+    def seed(self) -> int:
+        """Seed for weight init and batch order; drawn once and recorded if not configured."""
+        seed = self.training.get("seed")
+        if seed is None:
+            seed = int(torch.seed() % 2**31)
+            self.raw.setdefault("training", {})["seed"] = seed
+        return int(seed)
 
     @property
     def weights(self) -> dict:
@@ -185,6 +227,17 @@ class RunConfig:
         """This run's output checkpoint (not to be confused with ``weights``, its inputs)."""
         return self.run_dir / f"{self.run_name}.pth"
 
+    def candidate_checkpoint_path(self, which: str) -> Path:
+        """Rolling checkpoint kept during training: ``best`` (lowest eval loss) or ``last``.
+
+        Only these two are kept -- one file per epoch would cost 20x the disk for weights that
+        are never used. Both survive the run, so ``selection`` can be reconsidered without
+        retraining; which epoch each holds is recorded in ``config_<run>.yaml``.
+        """
+        if which not in ("best", "last"):
+            raise ValueError(f"which must be 'best' or 'last', got {which!r}")
+        return self.run_dir / f"{self.run_name}_{which}.pth"
+
     @property
     def labels_path(self) -> Path:
         return self.run_dir / f"labels_{self.run_name}.json"
@@ -252,6 +305,8 @@ class RunConfig:
             f"dataset             : {self.dataset_name}",
             f"target matrix params: {self.params}",
             f"epochs / lr         : {self.training['num_epochs']} / {self.training['learning_rate']}",
+            f"checkpoint selection: {self.selection} ({self.selection_metric})",
+            f"seed                : {self.seed}",
             f"loss                : {self.training['loss'].get('name') or 'WeightedFocalLoss'}"
             f"  (class weights: {self.training['use_class_weights']})",
             f"target matrix dir   : {self.target_matrix_dir}",

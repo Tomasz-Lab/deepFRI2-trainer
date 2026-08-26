@@ -47,6 +47,35 @@ class WeightedFocalLoss(nn.Module):
         return focal_loss.mean()
 
 
+class DAGPropagator:
+    """Max-propagate probabilities up the GO DAG: ``parent >= max(children)``.
+
+    The convention CAFA-evaluator uses before scoring, applied here to eval predictions so the
+    in-loop Fmax matches the benchmark. Deliberately separate from ``MCMLossDAG``, which runs
+    the same propagation inside the loss: keeping them apart means a change here cannot alter
+    the training objective.
+    """
+
+    def __init__(self, A: torch.Tensor, num_steps: int | None = None):
+        A = A.float().t().contiguous()          # input is CHILD -> PARENT
+        self.parent_idx, self.child_idx = (A != 0).nonzero(as_tuple=True)
+        if num_steps is None:
+            num_steps = MCMLossDAG._estimate_dag_depth(self.parent_idx, self.child_idx, A.shape[0])
+        self.num_steps = int(max(0, num_steps))
+
+    def __call__(self, probabilities) -> np.ndarray:
+        out = torch.as_tensor(np.asarray(probabilities), dtype=torch.float32)
+        if self.parent_idx.numel() == 0 or self.num_steps == 0:
+            return out.numpy()
+        index = self.parent_idx.unsqueeze(0).expand(out.shape[0], -1)
+        for _ in range(self.num_steps):
+            nxt = out.clone()
+            nxt.scatter_reduce_(1, index, out.index_select(1, self.child_idx),
+                                reduce="amax", include_self=True)
+            out = nxt
+        return out.numpy()
+
+
 class MCMLossDAG(nn.Module):
     """
     MCM loss using *direct* GO adjacency (parent -> child) instead of a transitive closure.

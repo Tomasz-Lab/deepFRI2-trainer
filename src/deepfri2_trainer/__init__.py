@@ -39,7 +39,14 @@ from .outputs import (
 )
 from .parity import BackendSensitivity, ParityReport, check_parity, probe_backend_sensitivity
 from .prepare import prepare_released_runs
-from .pipeline import STAGE_ORDER, StageResult, run_stage, run_stages
+from .pipeline import (
+    STAGE_ORDER,
+    StageResult,
+    correlate,
+    run_stage,
+    run_stages,
+    select_epoch,
+)
 from .predict import prediction_path, write_all_predictions, write_predictions
 from .train import build_loss_kwargs, run_training
 
@@ -62,6 +69,7 @@ __all__ = [
     "build_sequence_model",
     "build_structure_model",
     "check_parity",
+    "correlate",
     "load_config",
     "load_targets",
     "model",
@@ -74,6 +82,7 @@ __all__ = [
     "run_stage",
     "run_stages",
     "run_training",
+    "select_epoch",
     "sanity",
     "save_config",
     "save_labels",
