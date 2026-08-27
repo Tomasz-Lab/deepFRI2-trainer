@@ -11,7 +11,7 @@ model:
                soft_x, sigma_x, period, freq, freq_amp]
   anti_feats: [max, mean, topk_mean, count, argmax_r, argmax_c, topk_std,
                soft_x, soft_y, sigma_x, sigma_y, rho]
-  peak_thresh: 0.6
+  peak_thresh: 0.5
   topk_k: 5
   hidden_dim: 512
   amp_dtype: null              # autocast dtype inside the model; null disables it (bfloat16 gives faster training, but worse GPU-CPU compatibility)

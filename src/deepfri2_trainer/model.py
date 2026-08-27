@@ -311,7 +311,7 @@ class StructuralProber(nn.Module):
         anti_stride: int = 2,
         diag_feats: Tuple[str, ...] = ("max", "mean", "count", "topk_mean", "topk_std", "argmax_r", "argmax_c"),
         anti_feats: Tuple[str, ...] = ("max", "mean", "count", "topk_mean", "topk_std", "argmax_r", "argmax_c"),
-        peak_thresh: float = 0.6,
+        peak_thresh: float = 0.5,
         topk_k: int = 3,
         frozen_kernels: bool = False,
         user_kernels_diag: Optional[Dict[str, torch.Tensor]] = None,  # key arch_id -> (m_d, m_d)
@@ -708,7 +708,8 @@ class StructuralProber(nn.Module):
                         }
                     for k, a in enumerate(self.arch_ids_diag):
                         feats = self._features_from_scores(scores_flat[:, k, :], mask_flat,
-                                                           starts, m, Leff, N, self.diag_features)
+                                                           starts, m, Leff, N, self.diag_features,
+                                                           peak_thresh=self.peak)
                         feats_all.append(torch.stack(feats, dim=-1))
                         if return_attr:
                             topk = min(max(1, self.k_top), Wtot)
@@ -781,7 +782,8 @@ class StructuralProber(nn.Module):
                         }
                     for k, a in enumerate(self.arch_ids_anti):
                         feats = self._features_from_scores(scores_flat[:, k, :], mask_flat,
-                                                           starts, m, Leff, N, self.anti_features)
+                                                           starts, m, Leff, N, self.anti_features,
+                                                           peak_thresh=self.peak)
                         feats_all.append(torch.stack(feats, dim=-1))
                         if return_attr:
                             topk = min(max(1, self.k_top), Wtot)
@@ -965,8 +967,9 @@ class FusionModel(nn.Module):
         gate   = sigmoid(Linear(x_gate))                    # (B, num_labels)
         logits = gate * logits_seq + (1 - gate) * logits_struct
 
-    The gate starts near 0 (via ``gate_init_bias``) so the model begins close to
-    the sequence model and learns to mix in structure only where it helps.
+    ``gate_init_bias`` sets where the blend starts; the gate is trainable and in
+    practice converges towards the sequence branch, mixing in structure only for
+    the labels where it helps.
 
     ``gate_input`` selects which sequence-model tensor drives the gate:
       - ``'hidden'``: ``relu(fc1(ln(pooled)))`` (stronger signal)
