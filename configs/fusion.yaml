@@ -39,7 +39,7 @@ training:
   grad_clip_max_norm: 1.0
   use_class_weights: false
   loss:
-    name: MCMLossDAG
+    name: MCLossDAG
     kwargs: {}
 
 # The frozen sub-models, per ontology. Required for a fusion-only run; when sequence /

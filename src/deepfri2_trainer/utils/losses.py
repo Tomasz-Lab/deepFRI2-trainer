@@ -1,8 +1,8 @@
 """Loss functions.
 
 - ``WeightedFocalLoss`` -- focal loss with per-GO-term class weights; structure model.
-- ``MCMLossDAG``        -- hierarchy-aware BCE that max-propagates probabilities along the
-  direct GO edges; sequence and fusion models.
+- ``MCLossDAG``         -- max constraint loss (MCLoss) over the direct GO edges; sequence and
+  fusion models.
 """
 
 import numpy as np
@@ -51,7 +51,7 @@ class DAGPropagator:
     """Max-propagate probabilities up the GO DAG: ``parent >= max(children)``.
 
     The convention CAFA-evaluator uses before scoring, applied here to eval predictions so the
-    in-loop Fmax matches the benchmark. Deliberately separate from ``MCMLossDAG``, which runs
+    in-loop Fmax matches the benchmark. Deliberately separate from ``MCLossDAG``, which runs
     the same propagation inside the loss: keeping them apart means a change here cannot alter
     the training objective.
     """
@@ -60,7 +60,7 @@ class DAGPropagator:
         A = A.float().t().contiguous()          # input is CHILD -> PARENT
         self.parent_idx, self.child_idx = (A != 0).nonzero(as_tuple=True)
         if num_steps is None:
-            num_steps = MCMLossDAG._estimate_dag_depth(self.parent_idx, self.child_idx, A.shape[0])
+            num_steps = MCLossDAG._estimate_dag_depth(self.parent_idx, self.child_idx, A.shape[0])
         self.num_steps = int(max(0, num_steps))
 
     def __call__(self, probabilities) -> np.ndarray:
@@ -76,9 +76,13 @@ class DAGPropagator:
         return out.numpy()
 
 
-class MCMLossDAG(nn.Module):
-    """
-    MCM loss using *direct* GO adjacency (parent -> child) instead of a transitive closure.
+class MCLossDAG(nn.Module):
+    """Max constraint loss (MCLoss) over *direct* GO adjacency, not a transitive closure.
+
+    MCLoss and the max constraint module (MCM) it builds on are from Giunchiglia &
+    Lukasiewicz, "Coherent Hierarchical Multi-Label Classification Networks" (NeurIPS 2020).
+    MCM is the architectural component that takes the max over a term's descendants; MCLoss is
+    the objective evaluated on top of it.
 
     Convention:
       A[p, c] = 1  iff  GO term p is a (direct) parent of GO term c.
@@ -231,3 +235,8 @@ class MCMLossDAG(nn.Module):
                 out = out_next
 
         return out.to(dtype=outputs.dtype)
+
+
+# Renamed to match the source paper. The old name is kept so archived run configs 
+# (`loss.name: MCMLossDAG`) still resolve to the same class.
+MCMLossDAG = MCLossDAG

@@ -10,7 +10,7 @@ import torch.nn as nn
 from .config import RunConfig
 from .data import Loaders, Targets
 from .utils.losses import DAGPropagator
-from .utils.training import count_trainable_parameters, train_model
+from .utils.training import MCLOSS_NAMES, count_trainable_parameters, train_model
 
 
 def build_loss_kwargs(cfg: RunConfig, targets: Targets, device: str | torch.device) -> dict[str, Any]:
@@ -20,12 +20,12 @@ def build_loss_kwargs(cfg: RunConfig, targets: Targets, device: str | torch.devi
 
     if name is None:
         loss_fn_kwargs = None          # train_model falls back to WeightedFocalLoss
-    elif name == "MCMLossDAG":
+    elif name in MCLOSS_NAMES:
         loss_fn_kwargs = {"A": targets.adjacency.to(device), **(loss_cfg.get("kwargs") or {})}
     else:
         raise ValueError(
-            f"unsupported loss {name!r}; configs may use 'MCMLossDAG' or null "
-            "(null selects WeightedFocalLoss)"
+            f"unsupported loss {name!r}; configs may use one of {sorted(MCLOSS_NAMES)} or "
+            "null (null selects WeightedFocalLoss)"
         )
 
     return {

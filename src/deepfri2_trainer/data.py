@@ -43,7 +43,7 @@ def _load_pickle_for_ontology(path: Path, ontology: str):
 def load_targets(cfg: RunConfig) -> Targets:
     """Load the target matrix (train/eval + test + CAZy) for ``cfg.ontology``.
 
-    ``adjacency_prop.pkl`` (the transitive closure) is not loaded: ``MCMLossDAG`` works on the
+    ``adjacency_prop.pkl`` (the transitive closure) is not loaded: ``MCLossDAG`` works on the
     direct edges in ``adjacency.pkl``.
     """
     tm = cfg.target_matrix_dir

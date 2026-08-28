@@ -4,9 +4,9 @@
 Trained in dependency order; the fusion gate consumes the frozen sequence and structure
 models:
 
-    sequence    SequenceAnalyzer    ESM-2 embeddings   MCMLossDAG
+    sequence    SequenceAnalyzer    ESM-2 embeddings   MCLossDAG
     structure   StructuralProber    CA distograms      WeightedFocalLoss (class weights)
-    fusion      FusionModel         both               MCMLossDAG
+    fusion      FusionModel         both               MCLossDAG
 
 Hyperparameters, dataset versions and paths are not arguments -- they live in `configs/`
 (`paths.yaml`, `data.yaml`, `sequence.yaml`, `structure.yaml`, `fusion.yaml`). The arguments

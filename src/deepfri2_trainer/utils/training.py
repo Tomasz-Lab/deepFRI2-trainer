@@ -17,7 +17,10 @@ import tqdm
 import wandb
 from scipy.special import expit as sigmoid
 
-from .losses import MCMLossDAG, WeightedFocalLoss
+from .losses import MCLossDAG, WeightedFocalLoss
+
+# `MCMLossDAG` is the pre-rename spelling, still present in archived run configs.
+MCLOSS_NAMES = ("MCLossDAG", "MCMLossDAG")
 
 
 def format_duration(seconds: float) -> str:
@@ -65,9 +68,9 @@ def initialize_training(
     """Initialize the optimizer and the loss function."""
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-    if loss_fn_name == "MCMLossDAG":
+    if loss_fn_name in MCLOSS_NAMES:
         assert isinstance(loss_fn_kwargs, dict)
-        loss_fn = MCMLossDAG(
+        loss_fn = MCLossDAG(
             A=loss_fn_kwargs["A"],
             num_steps=loss_fn_kwargs.get("num_steps"),
             raw_violation_weight=loss_fn_kwargs.get("raw_violation_weight", 0.0),
@@ -77,8 +80,8 @@ def initialize_training(
         loss_fn = WeightedFocalLoss(alpha=weights)
     else:
         raise ValueError(
-            f"unknown loss_fn_name {loss_fn_name!r}; expected 'MCMLossDAG' or None "
-            "(None selects WeightedFocalLoss)"
+            f"unknown loss_fn_name {loss_fn_name!r}; expected one of {sorted(MCLOSS_NAMES)} "
+            "or None (None selects WeightedFocalLoss)"
         )
 
     return optimizer, loss_fn

@@ -8,9 +8,9 @@ protein function predictors. Datasets come from
 
 | Stage | Model | Input | Loss |
 |---|---|---|---|
-| `sequence` | `SequenceAnalyzer` | ESM-2 embeddings | `MCMLossDAG` |
+| `sequence` | `SequenceAnalyzer` | ESM-2 embeddings | `MCLossDAG` |
 | `structure` | `StructuralProber` | CA distograms | `WeightedFocalLoss` (class weights) |
-| `fusion` | `FusionModel` | both — frozen sequence + frozen structure + trainable gate | `MCMLossDAG` |
+| `fusion` | `FusionModel` | both — frozen sequence + frozen structure + trainable gate | `MCLossDAG` |
 
 ```bash
 conda env create -f environment.yml && conda activate deepfri2_trainer
@@ -119,8 +119,8 @@ python train.py --ontology MF --set training.num_epochs=5 data.batch_size=16
 ```
 
 Defaults reproduce the released checkpoints: annotation threshold 50, data version `20250908`,
-GO version `20250722`; sequence 20 epochs @ 1e-4 with `MCMLossDAG`, structure 20 epochs @ 2e-4
-with `WeightedFocalLoss` and class weights, fusion 15 epochs @ 1e-4 with `MCMLossDAG`. The one
+GO version `20250722`; sequence 20 epochs @ 1e-4 with `MCLossDAG`, structure 20 epochs @ 2e-4
+with `WeightedFocalLoss` and class weights, fusion 15 epochs @ 1e-4 with `MCLossDAG`. The one
 deliberate departure is `selection: best` (see below). `run.sh` records the exact command for
 every released model.
 
@@ -341,7 +341,7 @@ first stage's log. The cross-stage summary is appended to the last stage's log.
 `training.log` brackets every run:
 
 ```
-<date> 10:34 | START  | MF__sequence__<run> | num_labels=... epochs=20 lr=0.0001 loss=MCMLossDAG train_on=train train_batches=... parity=identical
+<date> 10:34 | START  | MF__sequence__<run> | num_labels=... epochs=20 lr=0.0001 loss=MCLossDAG train_on=train train_batches=... parity=identical
 <date> 11:58 | DONE   | MF__sequence__<run> | epoch=<shipped>/20 checkpoint=<run>_best.pth optimum_epoch=... selection=best train_on=train seed=42 train_loss=... eval_loss=... eval_fmax=... time=... per_epoch=... dir=...
 ```
 
