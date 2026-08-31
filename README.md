@@ -25,10 +25,13 @@ python train.py --ontology BP --train-on train+eval  # production models trained
 A complete model is nine runs: 3 ontologies x 3 stages. `python train.py --help` lists every
 parameter; the `train.py` docstring documents them in full.
 
-Not yet wired in: the protein-centric **CAFA evaluation** (it will append its scores to
-`training.log`; runs already write the prediction TSVs it consumes), and **retraining /
-fine-tuning** beyond loading initial weights — swapping the GO-term head for a
-regression/classification task, and restricting to a GO-term subset.
+`validate.ipynb` scores trained runs with the protein-centric **CAFA evaluation** and draws
+the paper's figures and tables — see [CAFA evaluation](#cafa-evaluation) below.
+
+Not yet wired in: CAFA scores appended to `training.log` at the end of a run (they are computed
+in the notebook for now), and **retraining / fine-tuning** beyond loading initial weights —
+swapping the GO-term head for a regression/classification task, and restricting to a GO-term
+subset.
 
 ## Architectures: owned here, checked against inference
 
@@ -354,6 +357,62 @@ To promote a run into deepFRI2, copy `<run>.pth` and `labels_<run>.json` into
 `deepFRI2/params/<ontology>/` and add the run name to `MODEL_NAMES` in
 `deepFRI2/src/deepFRI2/config.py`.
 
+## CAFA evaluation
+
+[`validate.ipynb`](validate.ipynb) scores runs against deepFRI v1 and the published competitors
+on the evaluation, test and CAZy splits, and produces the figures and tables of the paper. It is
+a notebook rather than a CLI on purpose: figures are made by looking at them.
+
+Scores come from [CAFA-evaluator](https://github.com/BioComputingUP/CAFA-evaluator)
+(`cafaeval`, pinned in `environment.yml`). If it is not installed in the environment but a
+checkout is at hand, point `CAFA_EVALUATOR_SRC` at its `src` directory.
+
+The mechanics are in [`utils/evaluator.py`](src/deepfri2_trainer/utils/evaluator.py) and
+[`utils/figures.py`](src/deepfri2_trainer/utils/figures.py); everything specific to a machine, a
+dataset or a set of competitors — the path templates, the run names, the method names and the
+colours — is in the notebook's **Setup** cell, so the modules carry no local paths.
+
+```python
+paths = EvalPaths.from_configs(LAYOUT)          # versions and roots from configs/
+
+ev = CafaEvaluation(paths)
+ev.add_runs({"MF": {"deepFRI2 (fusion)": "dainty-deluge-829"}})   # wandb run names
+ev.add_deepfri1(DEEPFRI1)
+ev.add_competitors(COMPETITORS, keep=KEEP)      # FunFams, DeepGO-SE, eggNOG-mapper, PO2GO
+
+curves = ev.curves        # tidy: one row per (method, ontology, split, tau)
+ev.summary(weighted=True) # per method: Fmax, its threshold / precision / recall / coverage, Smin
+ev.table("fmax", split="test", weighted=False)                    # methods x ontologies
+
+figures.panel(curves, split="test", ontology="MF", weighted=True) # F1, PR, S, coverage
+figures.compare(curves, "f", by="ontology", split="test", weighted=True)
+figures.bars(curves, "fmax", split="cazy", weighted=False)
+```
+
+`curves` carries both the unweighted and the information-accretion weighted metrics, so
+`weighted=` — an argument on every table and every figure — switches between them at read time
+and never re-runs anything.
+
+Each figure and table titles itself from what it actually shows and carries the matching file
+name, so `figures.save` takes a *directory*, never a name: `bars(..., split="cazy")` can only be
+written as `bars_fmax_cazy_unweighted.png`. Figures save as png + pdf, tables as csv + tex.
+
+Every method is scored once and its curves cached as
+`cafa-{eval,test,cazy}-all_<name>.pickle` next to its predictions, in the file names the
+previous validation notebook used — so the scores already computed are reused as they are, and
+the notebook opens in seconds. A run that has never been scored is scored on the spot;
+`CafaEvaluation(paths, recompute=True)` redoes the rest.
+
+Two conventions worth knowing:
+
+- Metrics are weighted by information content by default. The IA table
+  (`IA_<data version>_HQ.tsv`) comes from the InformationAccretion repository, which is not yet
+  wired in — its location is the `ia` entry of `LAYOUT` in the notebook. Without the file, only
+  the unweighted metrics are available.
+- `summary()` reports `smin` as the minimum of the column it summarises. CAFA-evaluator's own
+  `best` tables pick the threshold by the *unweighted* `s` and print `s_w` there, which is
+  slightly higher than the minimum of `s_w`.
+
 ## Logged metrics
 
 Per epoch, to wandb and to the console / `log.txt`:
@@ -371,17 +430,6 @@ The macro numbers each skip the terms where they are undefined, so they are aver
 `recall`. That is standard macro-averaging (it matches
 `sklearn.metrics.precision_recall_fscore_support(average="macro", zero_division=np.nan)`) but
 easy to misread, hence the micro averages and class counts alongside.
-
-> **Macro F1 was wrong before 2026-08-05.** It was computed as `2pr/(p+r)` elementwise, so a GO
-> term with ground truth that the model never predicted inherited precision's NaN and was
-> dropped by `nanmean` — averaging F1 over only the terms the model happened to fire on. On a
-> sparse label space that inflated it several-fold and produced impossible combinations such as
-> macro F1 0.4 next to macro recall 0.037. F1 is now `2·tp / (predicted + support)`, matching
-> sklearn. **F1 values logged before this fix are not comparable with the ones after it**;
-> precision and recall are unaffected.
-
-Label-macro-F1 at a fixed threshold is a coarse diagnostic here — the CAFA evaluation is the
-metric to judge models on, and it is not wired in yet.
 
 ## Sanity checks
 
@@ -419,6 +467,7 @@ annotations.
 configs/                      paths, data versions, per-model hyperparameters
 environment.yml               conda environment (GPU)
 train.py                      CLI entry point
+validate.ipynb                CAFA evaluation: figures and tables for the paper
 src/deepfri2_trainer/
     model.py                  deepFRI2 model definitions
     load_model.py             config -> model, checkpoint loading, backend flags
@@ -432,6 +481,8 @@ src/deepfri2_trainer/
     prepare.py                import released deepFRI2 checkpoints into runs_dir
     sanity.py                 sanity & validation checks
     utils/                    dataloader, training loop, losses
+        evaluator.py          CAFA scores: ground truth, CAFA-evaluator, caching, tidy table
+        figures.py            figures and tables from those scores
 tests/
     test_model_equivalence.py architecture fidelity + parity
     test_metrics.py           logged P/R/F1 vs sklearn
