@@ -147,7 +147,7 @@ def _submodel_test_predictions(cfg: RunConfig, reference: str, model_type: str) 
     """Locate the test predictions written when a fusion sub-model was trained.
 
     Returns ``None`` when there are none -- the case for checkpoints imported by
-    ``train.py --prepare``, which have weights but no predictions.
+    ``train.py --import-released``, which have weights but no predictions.
     """
     weights = cfg.resolve_weights(reference, model_type)
     # Predictions sit next to the weights and carry the same run name.

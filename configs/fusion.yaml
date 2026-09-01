@@ -52,7 +52,7 @@ training:
 # and must share the ontology, data version, GO version and annotation threshold of this run.
 # A reference that resolves to nothing raises, listing every path tried.
 #
-# The defaults are the released deepFRI2 run names; `python train.py --prepare` imports those
+# The defaults are the released deepFRI2 run names; `python train.py --import-released` imports those
 # checkpoints into runs_dir. Override per run with --weights-sequence / --weights-structure.
 weights:
   MF:

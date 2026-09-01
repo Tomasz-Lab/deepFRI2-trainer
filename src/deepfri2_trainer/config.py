@@ -159,7 +159,7 @@ class RunConfig:
         raise FileNotFoundError(
             f"{model_type} weights {reference!r} not found for {self.ontology}; looked for:\n"
             + "\n".join(f"  {candidate}" for candidate in candidates)
-            + "\nTrain it first, run `python train.py --prepare` to import the released deepFRI2 "
+            + "\nTrain it first, run `python train.py --import-released` to import the released deepFRI2 "
             f"checkpoints, or fix `weights.{self.ontology}` in configs/."
         )
 

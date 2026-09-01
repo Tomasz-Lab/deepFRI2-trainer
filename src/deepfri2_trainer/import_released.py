@@ -1,6 +1,6 @@
 """Import the released deepFRI2 checkpoints into the runs directory.
 
-``python train.py --prepare`` copies the checkpoints the inference module declares
+``python train.py --import-released`` copies the checkpoints the inference module declares
 (``deepFRI2/src/deepFRI2/config.py :: MODEL_NAMES``, weights under
 ``deepFRI2/params/<ontology>/``) into run directories of the usual shape::
 
@@ -39,7 +39,7 @@ def released_params_dir(cfg: RunConfig) -> Path:
     return cfg.deepfri2_src.parent / "params"
 
 
-def prepare_released_runs(
+def import_released_runs(
     ontologies: tuple[str, ...] = ONTOLOGIES,
     model_types: tuple[str, ...] = MODEL_TYPES,
     config_dir: Path | str | None = None,
@@ -102,7 +102,7 @@ def prepare_released_runs(
                             "imported_at": f"{datetime.now():%Y-%m-%d %H:%M:%S}",
                             "deepfri2_commit": commit,
                             "note": (
-                                "Released deepFRI2 checkpoint imported by `train.py --prepare`; "
+                                "Released deepFRI2 checkpoint imported by `train.py --import-released`; "
                                 "not trained by this repository. No prediction TSVs, so the "
                                 "fusion branch sanity check cannot use it."
                             ),
