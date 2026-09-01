@@ -7,6 +7,9 @@ __pycache__/
 configs/*.local.yaml
 .env
 
+# figures and tables written by validate.ipynb; drop this line to track them
+figures/
+
 # run outputs live under runs_dir, outside the repo, but guard anyway
 runs/
 *.pth

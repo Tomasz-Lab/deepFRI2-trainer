@@ -2,7 +2,17 @@
 
 Training, retraining and fine-tuning of [deepFRI2](https://github.com/Tomasz-Lab/deepFRI2)
 protein function predictors. Datasets come from
-[FRIdata](https://github.com/Tomasz-Lab/FRIdata); this repository only consumes them.
+[FRIdata](https://github.com/Tomasz-Lab/FRIdata); this repository only uses them.
+
+The pipeline this repository sits in (last three):
+
+| Step | Produces | Where |
+|---|---|---|
+| provide inputs | protein IDs, annotations, GO graph | `data/inputs/` |
+| [FRIdata](https://github.com/Tomasz-Lab/FRIdata) | sequences, distograms, ESM-2 embeddings | `data/FRIdata_output/` |
+| **`preprocess.py`** | target matrices, ground truth, train/eval split | `data/target_matrix/` |
+| **`train.py`** | checkpoints, predictions | `runs_dir` |
+| **`validate.ipynb`** | CAFA scores, figures, tables | `figures/` |
 
 `train.py` trains the sub-models of one ontology (MF / CC / BP) in dependency order:
 
@@ -16,7 +26,10 @@ protein function predictors. Datasets come from
 conda env create -f environment.yml && conda activate deepfri2_trainer
 wandb login
 
-python train.py --prepare                            # once: import the released checkpoints
+python preprocess.py --dry-run                       # check every input is where configs say
+python preprocess.py --ontology MF                   # target matrix, split, CAZy targets
+
+python train.py --import-released                    # once: import the released checkpoints
 python train.py --ontology MF                        # all three models
 python train.py --ontology MF --stages fusion        # just the fusion gate
 python train.py --ontology BP --train-on train+eval  # production models trained on everything
@@ -25,10 +38,58 @@ python train.py --ontology BP --train-on train+eval  # production models trained
 A complete model is nine runs: 3 ontologies x 3 stages. `python train.py --help` lists every
 parameter; the `train.py` docstring documents them in full.
 
-Not yet wired in: the protein-centric **CAFA evaluation** (it will append its scores to
-`training.log`; runs already write the prediction TSVs it consumes), and **retraining /
-fine-tuning** beyond loading initial weights — swapping the GO-term head for a
-regression/classification task, and restricting to a GO-term subset.
+`validate.ipynb` scores trained runs with the protein-centric **CAFA evaluation** and draws
+the paper's figures and tables — see [CAFA evaluation](#cafa-evaluation) below.
+
+Not yet wired in: CAFA scores appended to `training.log` at the end of a run (they are computed
+in the notebook for now), and **retraining / fine-tuning** beyond loading initial weights —
+swapping the GO-term head for a regression/classification task, and restricting to a GO-term
+subset.
+
+## Preprocessing
+
+[`preprocess.py`](preprocess.py) turns the primitive inputs into the supervision `train.py`
+consumes. Three steps, each runnable alone:
+
+| Step | Produces | Cost |
+|---|---|---|
+| `targets` | the eight target-matrix pickles + the test-set FASTA | slow — reads the multi-GB annotation tables, once for all requested ontologies |
+| `split` | trainval FASTA, MMseqs2 clustering, `train.tsv` / `eval.tsv` | minutes |
+| `cazy` | CAZy label vectors in the model's own GO-term order | seconds |
+
+```bash
+python preprocess.py --dry-run                        # resolved config + every input checked
+python preprocess.py --ontology MF                    # all three steps
+python preprocess.py --ontology MF --steps split      # just re-split
+python preprocess.py --set annotation_threshold=70    # a different label space
+```
+
+`targets` decides the label space: a GO term enters it only if at least
+`annotation_threshold` proteins carry it, and the resulting subgraph must stay a single
+connected DAG. From that come `go_indices` (the output order of the model), the sparse
+`protein_vectors`, the per-term loss `weights`, the `adjacency` the hierarchy loss propagates
+over, and the `grand_truth` tables the CAFA evaluation scores against. Ground truth is always
+high-quality annotations only and spans the **full** GO graph, not the thresholded subgraph —
+the evaluation must not be told to ignore terms the model was never given.
+
+`split` is homology-aware: sequences are clustered with MMseqs2 at `min_seq_id` and **whole
+clusters** are assigned, so no evaluation protein has a close homologue in training. Of
+`num_trials` random assignments it keeps the one whose per-GO-term evaluation fraction is best
+balanced, so rare terms stay represented on both sides.
+
+Two settings in `configs/data.yaml :: preprocess` control whether a run rebuilds or reproduces:
+
+| Setting | Null | Set |
+|---|---|---|
+| `go_indices_from` | derive the GO-term order from the graph | adopt an existing `go_indices.pkl` order |
+| `split.adopt_from` | cluster and split with MMseqs2 (`seed`) | copy an existing `train.tsv` / `eval.tsv` |
+
+`go_indices_from` refuses if the GO term *sets* differ: a different threshold or annotation
+version is a different label space, not a reordering of one. Set both to null for a genuinely
+new model.
+
+Every run appends its whole console output to `data/data.log`, under a header giving the
+date and the exact command.
 
 ## Architectures: owned here, checked against inference
 
@@ -265,12 +326,12 @@ to a `.pth`**. One that resolves to nothing raises, listing every path tried:
 FileNotFoundError: sequence weights 'wandb-name-1' not found for CC; looked for:
   <runs_dir>/CC__sequence__wandb-name-1/wandb-name-1.pth
   <runs_dir>/wandb-name-1/wandb-name-1.pth
-Train it first, run `python train.py --prepare` to import the released deepFRI2 checkpoints, ...
+Train it first, run `python train.py --import-released` to import the released deepFRI2 checkpoints, ...
 ```
 
-### `--prepare`
+### `--import-released`
 
-`python train.py --prepare` reads the run names the inference module declares
+`python train.py --import-released` reads the run names the inference module declares
 (`deepFRI2/src/deepFRI2/config.py :: MODEL_NAMES`) and copies
 `deepFRI2/params/<ontology>/<run>.pth`, plus its labels JSON when shipped, into ordinary run
 directories:
@@ -354,6 +415,62 @@ To promote a run into deepFRI2, copy `<run>.pth` and `labels_<run>.json` into
 `deepFRI2/params/<ontology>/` and add the run name to `MODEL_NAMES` in
 `deepFRI2/src/deepFRI2/config.py`.
 
+## CAFA evaluation
+
+[`validate.ipynb`](validate.ipynb) scores runs against deepFRI v1 and the published competitors
+on the evaluation, test and CAZy splits, and produces the figures and tables of the paper. It is
+a notebook rather than a CLI on purpose: figures are made by looking at them.
+
+Scores come from [CAFA-evaluator](https://github.com/BioComputingUP/CAFA-evaluator)
+(`cafaeval`, pinned in `environment.yml`). If it is not installed in the environment but a
+checkout is at hand, point `CAFA_EVALUATOR_SRC` at its `src` directory.
+
+The mechanics are in [`utils/evaluator.py`](src/deepfri2_trainer/utils/evaluator.py) and
+[`utils/figures.py`](src/deepfri2_trainer/utils/figures.py); everything specific to a machine, a
+dataset or a set of competitors — the path templates, the run names, the method names and the
+colours — is in the notebook's **Setup** cell, so the modules carry no local paths.
+
+```python
+paths = EvalPaths.from_configs(LAYOUT)          # versions and roots from configs/
+
+ev = CafaEvaluation(paths)
+ev.add_runs({"MF": {"deepFRI2 (fusion)": "dainty-deluge-829"}})   # wandb run names
+ev.add_deepfri1(DEEPFRI1)
+ev.add_competitors(COMPETITORS, keep=KEEP)      # FunFams, DeepGO-SE, eggNOG-mapper, PO2GO
+
+curves = ev.curves        # tidy: one row per (method, ontology, split, tau)
+ev.summary(weighted=True) # per method: Fmax, its threshold / precision / recall / coverage, Smin
+ev.table("fmax", split="test", weighted=False)                    # methods x ontologies
+
+figures.panel(curves, split="test", ontology="MF", weighted=True) # F1, PR, S, coverage
+figures.compare(curves, "f", by="ontology", split="test", weighted=True)
+figures.bars(curves, "fmax", split="cazy", weighted=False)
+```
+
+`curves` carries both the unweighted and the information-accretion weighted metrics, so
+`weighted=` — an argument on every table and every figure — switches between them at read time
+and never re-runs anything.
+
+Each figure and table titles itself from what it actually shows and carries the matching file
+name, so `figures.save` takes a *directory*, never a name: `bars(..., split="cazy")` can only be
+written as `bars_fmax_cazy_unweighted.png`. Figures save as png + pdf, tables as csv + tex.
+
+Every method is scored once and its curves cached as
+`cafa-{eval,test,cazy}-all_<name>.pickle` next to its predictions, in the file names the
+previous validation notebook used — so the scores already computed are reused as they are, and
+the notebook opens in seconds. A run that has never been scored is scored on the spot;
+`CafaEvaluation(paths, recompute=True)` redoes the rest.
+
+Two conventions worth knowing:
+
+- Metrics are weighted by information content by default. The IA table
+  (`IA_<data version>_HQ.tsv`) comes from the InformationAccretion repository, which is not yet
+  wired in — its location is the `ia` entry of `LAYOUT` in the notebook. Without the file, only
+  the unweighted metrics are available.
+- `summary()` reports `smin` as the minimum of the column it summarises. CAFA-evaluator's own
+  `best` tables pick the threshold by the *unweighted* `s` and print `s_w` there, which is
+  slightly higher than the minimum of `s_w`.
+
 ## Logged metrics
 
 Per epoch, to wandb and to the console / `log.txt`:
@@ -371,17 +488,6 @@ The macro numbers each skip the terms where they are undefined, so they are aver
 `recall`. That is standard macro-averaging (it matches
 `sklearn.metrics.precision_recall_fscore_support(average="macro", zero_division=np.nan)`) but
 easy to misread, hence the micro averages and class counts alongside.
-
-> **Macro F1 was wrong before 2026-08-05.** It was computed as `2pr/(p+r)` elementwise, so a GO
-> term with ground truth that the model never predicted inherited precision's NaN and was
-> dropped by `nanmean` — averaging F1 over only the terms the model happened to fire on. On a
-> sparse label space that inflated it several-fold and produced impossible combinations such as
-> macro F1 0.4 next to macro recall 0.037. F1 is now `2·tp / (predicted + support)`, matching
-> sklearn. **F1 values logged before this fix are not comparable with the ones after it**;
-> precision and recall are unaffected.
-
-Label-macro-F1 at a fixed threshold is a coarse diagnostic here — the CAFA evaluation is the
-metric to judge models on, and it is not wired in yet.
 
 ## Sanity checks
 
@@ -418,7 +524,9 @@ annotations.
 ```
 configs/                      paths, data versions, per-model hyperparameters
 environment.yml               conda environment (GPU)
-train.py                      CLI entry point
+preprocess.py                 CLI entry point: inputs -> target matrix + split
+train.py                      CLI entry point: training
+validate.ipynb                CAFA evaluation: figures and tables for the paper
 src/deepfri2_trainer/
     model.py                  deepFRI2 model definitions
     load_model.py             config -> model, checkpoint loading, backend flags
@@ -429,9 +537,14 @@ src/deepfri2_trainer/
     pipeline.py               run_stage / run_stages orchestration
     predict.py                prediction TSV writing
     outputs.py                wandb session, run dir, artifacts, log.txt, training.log
-    prepare.py                import released deepFRI2 checkpoints into runs_dir
+    import_released.py        import released deepFRI2 checkpoints into runs_dir
+    preprocess.py             target matrix / split / CAZy target construction
     sanity.py                 sanity & validation checks
     utils/                    dataloader, training loop, losses
+        target_matrix.py      protein -> GO-term supervision from the annotation tables
+        split.py              homology-aware train/eval split (MMseqs2)
+        evaluator.py          CAFA scores: ground truth, CAFA-evaluator, caching, tidy table
+        figures.py            figures and tables from those scores
 tests/
     test_model_equivalence.py architecture fidelity + parity
     test_metrics.py           logged P/R/F1 vs sklearn

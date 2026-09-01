@@ -19,7 +19,7 @@ Or one stage at a time, with the intermediate objects in hand::
     model, metrics = run_training(cfg, model, loaders, targets)
 """
 
-from . import model, outputs, parity, prepare, sanity
+from . import import_released, model, outputs, parity, preprocess, sanity
 from .config import MODEL_TYPES, ONTOLOGIES, TRAIN_ON, RunConfig, load_config
 from .data import Loaders, Targets, build_loaders, load_targets
 from .load_model import (
@@ -38,7 +38,8 @@ from .outputs import (
     start_run,
 )
 from .parity import BackendSensitivity, ParityReport, check_parity, probe_backend_sensitivity
-from .prepare import prepare_released_runs
+from .import_released import import_released_runs
+from .preprocess import PreprocessConfig
 from .pipeline import (
     STAGE_ORDER,
     StageResult,
@@ -73,8 +74,10 @@ __all__ = [
     "load_config",
     "load_targets",
     "model",
-    "prepare",
-    "prepare_released_runs",
+    "PreprocessConfig",
+    "import_released",
+    "import_released_runs",
+    "preprocess",
     "outputs",
     "parity",
     "prediction_path",

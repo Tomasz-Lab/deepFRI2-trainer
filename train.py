@@ -15,7 +15,7 @@ below select what to train and where to run it.
 Parameters
 ----------
 --ontology {MF,CC,BP}
-    Required, except with --prepare.
+    Required, except with --import-released.
 --stages {sequence,structure,fusion} [...]
     Which models to train; default all three, always in sequence -> structure -> fusion order.
     Training `fusion` alone takes its frozen sub-models from `weights.<ontology>` in
@@ -29,8 +29,9 @@ Parameters
             --weights-sequence wandb-name-1 --weights-structure wandb-name-2
         python train.py --ontology MF --stages structure --weights-structure wandb-name-3
     Ignored for sub-models trained in the same call (those win).
---prepare
-    Import the released deepFRI2 checkpoints into `runs_dir` and exit. Reads the run names from
+--import-released
+    Import the released deepFRI2 checkpoints into `runs_dir` and exit. (`--prepare` is kept as
+    a deprecated alias.) Reads the run names from
     the inference module (`deepFRI2/src/deepFRI2/config.py :: MODEL_NAMES`) and copies
     `deepFRI2/params/<ontology>/<run>.pth` (plus its labels JSON, when shipped) into a normal
     run directory `<ontology>__<model type>__<run>/`. Those are what `configs/fusion.yaml`
@@ -86,7 +87,7 @@ three stages yields three run directories, three log.txt files and three START/D
 
 Examples
 --------
-    python train.py --prepare
+    python train.py --import-released
     python train.py --ontology MF
     python train.py --ontology BP --train-on train+eval
     python train.py --ontology CC --stages fusion
@@ -108,7 +109,7 @@ from deepfri2_trainer import (  # noqa: E402
     ONTOLOGIES,
     STAGE_ORDER,
     TRAIN_ON,
-    prepare_released_runs,
+    import_released_runs,
     run_stages,
 )
 
@@ -136,7 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--ontology", choices=ONTOLOGIES,
-                        help="Gene Ontology namespace to train (required unless --prepare)")
+                        help="Gene Ontology namespace to train (required unless --import-released)")
     parser.add_argument("--stages", nargs="+", choices=STAGE_ORDER, default=list(STAGE_ORDER),
                         help="models to train (always run in sequence, structure, fusion order)")
     parser.add_argument("--train-on", choices=TRAIN_ON, default="train",
@@ -163,7 +164,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="cap batches per epoch (smoke tests only)")
     parser.add_argument("--keep-models", action="store_true",
                         help="keep each stage's model in memory after it finishes")
-    parser.add_argument("--prepare", action="store_true",
+    parser.add_argument("--import-released", "--prepare", dest="import_released",
+                        action="store_true",
                         help="import the released deepFRI2 checkpoints into runs_dir and exit")
     return parser
 
@@ -175,8 +177,8 @@ def main(argv: list[str] | None = None) -> int:
     if overrides:
         print(f"config overrides: {overrides}")
 
-    if args.prepare:
-        prepare_released_runs(
+    if args.import_released:
+        import_released_runs(
             ontologies=(args.ontology,) if args.ontology else ONTOLOGIES,
             config_dir=args.config_dir,
             overrides=overrides,
@@ -184,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.ontology is None:
-        parser.error("--ontology is required (unless --prepare)")
+        parser.error("--ontology is required (unless --import-released)")
 
     weights = {
         which: name

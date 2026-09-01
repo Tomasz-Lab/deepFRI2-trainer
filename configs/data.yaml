@@ -30,6 +30,38 @@ data:
   batch_size: 32
   num_workers: 4
 
+# Target-matrix construction (`python preprocess.py`). Paths are in paths.yaml :: preprocess.
+preprocess:
+  # Annotation qualities admitted into the TRAINING labels. The ground truth the CAFA
+  # evaluation scores against is always HQ only, whatever is listed here.
+  qualities: ['HQ']
+
+  # Drop each ontology's root term (GO:0003674 / GO:0005575 / GO:0008150) from the label space. 
+  exclude_roots: false
+
+  # Adopt the GO-term ordering of an existing go_indices.pkl instead of deriving a fresh one.
+  # The template may use {dataset_name}, {params} and {ontology}.
+  go_indices_from: '{project_location}/training/train_val_split/{dataset_name}/{params}/target_matrix'
+
+  # Homology-aware train/eval split: cluster with MMseqs2, then assign whole clusters, so no
+  # eval protein has a close homologue in training.
+  split:
+    # Adopt an existing split rather than computing one.
+    # Set to null for a new label space, which then uses `seed`.
+    adopt_from: '{project_location}/training/train_val_split/{dataset_name}/{params}/mmseqs_output'
+
+    min_seq_id: 0.5        # MMseqs2 clustering identity
+    eval_fraction: 0.1     # target share of proteins held out
+    num_trials: 1000       # random cluster assignments to try
+    seed: 42               # makes the search reproducible
+
+  # CAZy test set: which mapping tables under `inputs_dir/cazy/` to read.
+  cazy:
+    dataset_name: 'AFDB-subset--{data_version}_HMLQ_ESM2'   # all annotation qualities
+    mapping: 'min1000_fraction0.7'
+    min_seq_id: 0.3
+    coverage: 0.8
+
 sanity:
   # Protein used by the dataloader-consistency check (must be in the test set)
   probe_protein_id: 'P30679_A'

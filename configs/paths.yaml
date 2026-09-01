@@ -20,14 +20,37 @@ deepfri2_src: '{project_location}/production/deepFRI2/src'
 # single append-only log across all runs.
 runs_dir: '{project_location}/production/training/runs'
 
+# Preprocessing (`python preprocess.py`): where the primitive inputs live and where the
+# derived target matrices are written.
+preprocess:
+  # training IDs, information content, CAZy mapping tables, test-set protein list.
+  inputs_dir: '{project_location}/production/training/data/inputs/{data_version}'
+  # annots_<ontology>.pickle: GO annotations propagated over the graph
+  annotations_dir: '{project_location}/data/inputs/{data_version}/graphs/{go_version}'
+  # unified_reduced.csv: annotation metadata -- quality, testing flag, sequences
+  unified_file: '{project_location}/data/inputs/{data_version}/unified_reduced.csv'
+  # FRIdata output: `sequences_idx` maps protein id -> a FASTA path relative to `fridata_dir`
+  fridata_dir: '{project_location}/toolbox/data'
+  sequences_idx: '{project_location}/toolbox/data/datasets/{dataset_name}/sequences.idx'
+
+  # MMseqs2, for the homology-aware train/eval split
+  mmseqs_bin: /home/PawelSz/mmseqs/bin/mmseqs
+
+  # Everything preprocess.py writes. The `layout` entries below read from here.
+  out_dir: '{project_location}/production/training/data/target_matrix'
+
+  # Append-only record of every preprocessing run, the counterpart of runs_dir/training.log
+  log_file: '{project_location}/production/training/data/data.log'
+
 # Data-tree layout, relative to `project_location`. Placeholders are filled from the
 # data config: {dataset_name}, {params}, {data_version}, {ontology}, {threshold}.
 layout:
   # Embedding / distogram index directories (contain dataset.json, embeddings.idx, ...)
   datasets: toolbox/data/datasets
-  # Target matrix (go_indices, protein_vectors, weights, adjacency, ...)
-  target_matrix: training/train_val_split/{dataset_name}/{params}/target_matrix
+  # Target matrix (go_indices, protein_vectors, weights, adjacency, ...) -- written by
+  # preprocess.py into `preprocess.out_dir`; keep these three in sync with it.
+  target_matrix: production/training/data/target_matrix/{dataset_name}/{params}/target_matrix
   # train/eval split (train.tsv, eval.tsv)
-  split: training/train_val_split/{dataset_name}/{params}/mmseqs_output
+  split: production/training/data/target_matrix/{dataset_name}/{params}/mmseqs_output
   # CAZy test-set target matrix
-  cazy_target_matrix: testing/data/testset_cazy/{data_version}/target_matrix/uniprot/{ontology}_{threshold}
+  cazy_target_matrix: production/training/data/target_matrix/cazy/{data_version}/uniprot/{ontology}_{threshold}
