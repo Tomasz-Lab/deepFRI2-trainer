@@ -21,6 +21,7 @@ dependencies:
   - tqdm=4.67.1
   # training
   - h5py=3.12.1            # embedding / distogram stores
+  - networkx=3.6.1         # GO graph: thresholding, transitive closure, propagation
   - scikit-learn=1.6.0     # metric cross-checks in tests
   - pyyaml=6.0.2           # configs
   - matplotlib=3.10.0      # sanity plots

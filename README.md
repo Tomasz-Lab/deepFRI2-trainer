@@ -2,7 +2,17 @@
 
 Training, retraining and fine-tuning of [deepFRI2](https://github.com/Tomasz-Lab/deepFRI2)
 protein function predictors. Datasets come from
-[FRIdata](https://github.com/Tomasz-Lab/FRIdata); this repository only consumes them.
+[FRIdata](https://github.com/Tomasz-Lab/FRIdata); this repository only uses them.
+
+The pipeline this repository sits in (last three):
+
+| Step | Produces | Where |
+|---|---|---|
+| provide inputs | protein IDs, annotations, GO graph | `data/inputs/` |
+| [FRIdata](https://github.com/Tomasz-Lab/FRIdata) | sequences, distograms, ESM-2 embeddings | `data/FRIdata_output/` |
+| **`preprocess.py`** | target matrices, ground truth, train/eval split | `data/target_matrix/` |
+| **`train.py`** | checkpoints, predictions | `runs_dir` |
+| **`validate.ipynb`** | CAFA scores, figures, tables | `figures/` |
 
 `train.py` trains the sub-models of one ontology (MF / CC / BP) in dependency order:
 
@@ -16,7 +26,10 @@ protein function predictors. Datasets come from
 conda env create -f environment.yml && conda activate deepfri2_trainer
 wandb login
 
-python train.py --prepare                            # once: import the released checkpoints
+python preprocess.py --dry-run                       # check every input is where configs say
+python preprocess.py --ontology MF                   # target matrix, split, CAZy targets
+
+python train.py --import-released                    # once: import the released checkpoints
 python train.py --ontology MF                        # all three models
 python train.py --ontology MF --stages fusion        # just the fusion gate
 python train.py --ontology BP --train-on train+eval  # production models trained on everything
@@ -32,6 +45,51 @@ Not yet wired in: CAFA scores appended to `training.log` at the end of a run (th
 in the notebook for now), and **retraining / fine-tuning** beyond loading initial weights —
 swapping the GO-term head for a regression/classification task, and restricting to a GO-term
 subset.
+
+## Preprocessing
+
+[`preprocess.py`](preprocess.py) turns the primitive inputs into the supervision `train.py`
+consumes. Three steps, each runnable alone:
+
+| Step | Produces | Cost |
+|---|---|---|
+| `targets` | the eight target-matrix pickles + the test-set FASTA | slow — reads the multi-GB annotation tables, once for all requested ontologies |
+| `split` | trainval FASTA, MMseqs2 clustering, `train.tsv` / `eval.tsv` | minutes |
+| `cazy` | CAZy label vectors in the model's own GO-term order | seconds |
+
+```bash
+python preprocess.py --dry-run                        # resolved config + every input checked
+python preprocess.py --ontology MF                    # all three steps
+python preprocess.py --ontology MF --steps split      # just re-split
+python preprocess.py --set annotation_threshold=70    # a different label space
+```
+
+`targets` decides the label space: a GO term enters it only if at least
+`annotation_threshold` proteins carry it, and the resulting subgraph must stay a single
+connected DAG. From that come `go_indices` (the output order of the model), the sparse
+`protein_vectors`, the per-term loss `weights`, the `adjacency` the hierarchy loss propagates
+over, and the `grand_truth` tables the CAFA evaluation scores against. Ground truth is always
+high-quality annotations only and spans the **full** GO graph, not the thresholded subgraph —
+the evaluation must not be told to ignore terms the model was never given.
+
+`split` is homology-aware: sequences are clustered with MMseqs2 at `min_seq_id` and **whole
+clusters** are assigned, so no evaluation protein has a close homologue in training. Of
+`num_trials` random assignments it keeps the one whose per-GO-term evaluation fraction is best
+balanced, so rare terms stay represented on both sides.
+
+Two settings in `configs/data.yaml :: preprocess` control whether a run rebuilds or reproduces:
+
+| Setting | Null | Set |
+|---|---|---|
+| `go_indices_from` | derive the GO-term order from the graph | adopt an existing `go_indices.pkl` order |
+| `split.adopt_from` | cluster and split with MMseqs2 (`seed`) | copy an existing `train.tsv` / `eval.tsv` |
+
+`go_indices_from` refuses if the GO term *sets* differ: a different threshold or annotation
+version is a different label space, not a reordering of one. Set both to null for a genuinely
+new model.
+
+Every run appends its whole console output to `data/data.log`, under a header giving the
+date and the exact command.
 
 ## Architectures: owned here, checked against inference
 
@@ -268,12 +326,12 @@ to a `.pth`**. One that resolves to nothing raises, listing every path tried:
 FileNotFoundError: sequence weights 'wandb-name-1' not found for CC; looked for:
   <runs_dir>/CC__sequence__wandb-name-1/wandb-name-1.pth
   <runs_dir>/wandb-name-1/wandb-name-1.pth
-Train it first, run `python train.py --prepare` to import the released deepFRI2 checkpoints, ...
+Train it first, run `python train.py --import-released` to import the released deepFRI2 checkpoints, ...
 ```
 
-### `--prepare`
+### `--import-released`
 
-`python train.py --prepare` reads the run names the inference module declares
+`python train.py --import-released` reads the run names the inference module declares
 (`deepFRI2/src/deepFRI2/config.py :: MODEL_NAMES`) and copies
 `deepFRI2/params/<ontology>/<run>.pth`, plus its labels JSON when shipped, into ordinary run
 directories:
@@ -466,7 +524,8 @@ annotations.
 ```
 configs/                      paths, data versions, per-model hyperparameters
 environment.yml               conda environment (GPU)
-train.py                      CLI entry point
+preprocess.py                 CLI entry point: inputs -> target matrix + split
+train.py                      CLI entry point: training
 validate.ipynb                CAFA evaluation: figures and tables for the paper
 src/deepfri2_trainer/
     model.py                  deepFRI2 model definitions
@@ -478,9 +537,12 @@ src/deepfri2_trainer/
     pipeline.py               run_stage / run_stages orchestration
     predict.py                prediction TSV writing
     outputs.py                wandb session, run dir, artifacts, log.txt, training.log
-    prepare.py                import released deepFRI2 checkpoints into runs_dir
+    import_released.py        import released deepFRI2 checkpoints into runs_dir
+    preprocess.py             target matrix / split / CAZy target construction
     sanity.py                 sanity & validation checks
     utils/                    dataloader, training loop, losses
+        target_matrix.py      protein -> GO-term supervision from the annotation tables
+        split.py              homology-aware train/eval split (MMseqs2)
         evaluator.py          CAFA scores: ground truth, CAFA-evaluator, caching, tidy table
         figures.py            figures and tables from those scores
 tests/
