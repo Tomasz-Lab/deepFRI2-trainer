@@ -165,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # A benchmark (PEER, FLIP, ...) that already ships its own train/valid/test split: one CSV
     # + one already-built FRIdata dataset directory per split, instead of --csv/--structures and
-    # MMseqs2 clustering. --train-*/--eval-* are required together; --test-* is optional.
+    # MMseqs2 clustering. All three splits are required together.
     predefined = parser.add_argument_group("custom task, predefined split (e.g. PEER)")
     for split in ("train", "eval", "test"):
         predefined.add_argument(f"--{split}-csv", type=Path, metavar="PATH",
@@ -185,10 +185,10 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--csv and --train-csv/--eval-csv are mutually exclusive")
         if not args.task:
             parser.error("--task is required")
-        missing = {"train", "eval"} - set(predefined_splits)
+        missing = {"train", "eval", "test"} - set(predefined_splits)
         if missing:
-            parser.error(f"--train-csv/--train-dataset and --eval-csv/--eval-dataset are both "
-                         f"required together; missing {sorted(missing)}")
+            parser.error(f"--{{train,eval,test}}-csv and --{{train,eval,test}}-dataset are all "
+                         f"required together for a predefined split; missing {sorted(missing)}")
         for split, (csv_path, dataset_path) in predefined_splits.items():
             if not csv_path or not dataset_path:
                 parser.error(f"--{split}-csv and --{split}-dataset must be given together")

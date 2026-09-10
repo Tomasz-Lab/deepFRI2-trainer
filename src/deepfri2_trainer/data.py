@@ -108,10 +108,12 @@ def build_loaders(cfg: RunConfig, targets: Targets) -> Loaders:
     """Build the train / eval / test / CAZy dataloaders.
 
     ``unfix_type`` restores the protein-id spelling used by the embedding and distogram
-    indices: AFDB ids in the train/eval set, ``<id>_A`` in the test and CAZy sets. A custom
-    target matrix's dataset was built to whatever convention it was built with, so the
-    train/eval one is configurable (``data.trainval_unfix_type``); test and CAZy are simply
-    absent (``targets.protein_vectors_test`` / ``_cazy`` are ``None``) when there is no such set.
+    indices: AFDB ids in the train/eval set, ``<id>_A`` in the GO test and CAZy sets. A custom
+    target matrix's dataset was built to whatever convention it was built with, so both
+    train/eval and test are configurable (``data.trainval_unfix_type`` / ``testset_unfix_type``,
+    defaulting to the GO flow's own conventions); CAZy is GO-only and never present for a
+    custom target matrix. Test and CAZy are simply absent (``targets.protein_vectors_test`` /
+    ``_cazy`` are ``None``) when there is no such set.
     """
     dataset_kwargs = dict(
         use_embeddings=cfg.use_embeddings,
@@ -146,7 +148,7 @@ def build_loaders(cfg: RunConfig, targets: Targets) -> Loaders:
             emb_config_test["data_path"],
             protein_vectors=targets.protein_vectors_test,
             emb_size=emb_config_test["emb_size"],
-            unfix_type="chain",  # <id>_A
+            unfix_type=cfg.data.get("testset_unfix_type", "chain"),  # <id>_A
             **dataset_kwargs,
         )
         test_dataloader = create_test_loader(

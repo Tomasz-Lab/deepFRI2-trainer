@@ -127,22 +127,24 @@ checkpoint selection, outputs) works exactly as it does for a GO run.
 A benchmark that already ships its own train/valid/test split -- one CSV plus one already-built
 FRIdata dataset directory per split -- should not be re-clustered with MMseqs2: that would
 recompute a split the benchmark's published numbers assume is fixed. `--train-csv`/
-`--train-dataset` and `--eval-csv`/`--eval-dataset` (required together; `--test-csv`/
-`--test-dataset` optional) take that split as-is instead:
+`--train-dataset`, `--eval-csv`/`--eval-dataset` and `--test-csv`/`--test-dataset` (all three
+required together) take that split as-is instead:
 
 ```bash
 python preprocess.py --task gb1 \
     --train-csv  peer_csv/GB1/train.csv --train-dataset toolbox/data/datasets/other-part--GB1_train \
     --eval-csv   peer_csv/GB1/valid.csv --eval-dataset  toolbox/data/datasets/other-part--GB1_valid \
+    --test-csv   peer_csv/GB1/test.csv  --test-dataset  toolbox/data/datasets/other-part--GB1_test \
     --id-column id --label-columns target
 ```
 
 Every split's CSV must agree on label columns and task kind. PEER's own numbering repeats
-across splits (`train/0.cif`, `valid/0.cif`, ... are different proteins), so ids are prefixed by
-split name before the per-split dataset directories are combined into one merged dataset. That
-merge is a real copy, not just an index rewrite: `DeepFRIDataset` looks an embedding or
-distogram up by protein id *inside* the HDF5 file too, not only by file path, so the prefixed
-id has to actually exist as a key in the merged file.
+across splits (`train/0.cif`, `valid/0.cif`, `test/0.cif`, ... are different proteins), so ids
+are prefixed by split name before each split's dataset directory is merged into the trainval
+dataset (train + eval) or the test dataset. That merge is a real copy, not just an index
+rewrite: `DeepFRIDataset` looks an embedding or distogram up by protein id *inside* the HDF5
+file too, not only by file path, so the prefixed id has to actually exist as a key in the
+merged file -- for both the trainval and the test dataset alike.
 
 ## Architectures: owned here, checked against inference
 

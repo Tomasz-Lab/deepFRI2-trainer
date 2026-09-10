@@ -333,7 +333,12 @@ class CustomPreprocessConfig:
         ``id_convention`` (one of :data:`ID_CONVENTIONS`, including ``None`` for "no suffix, ids
         match directly") is always written explicitly -- ``None`` is itself a valid detected
         convention, not "unset", and ``data.trainval_unfix_type`` must say so or a training run
-        would fall back to the wrong default (``AFDB_v4``).
+        would fall back to the wrong default (``AFDB_v4``). A test split (``testset_suffix``
+        given) gets the same treatment: a predefined-split merge bakes each source's id
+        convention into the merged protein-vector keys itself (see
+        ``run_with_predefined_splits``), so both the train/eval and the test dataset need to be
+        read back with no further transform -- ``testset_unfix_type: null`` -- rather than the
+        GO flow's ``chain`` default.
         """
         root = f"{self.out_dir_relative}/{task}"
         data = {
@@ -342,6 +347,8 @@ class CustomPreprocessConfig:
             "cazyset_suffix": "", "go_version": "custom", "annotation_threshold": 0,
             "trainval_unfix_type": id_convention,
         }
+        if testset_suffix:
+            data["testset_unfix_type"] = None
         training = {"loss": {"name": "MSE" if task_kind == "regression" else None}}
         if task_kind == "regression":
             # eval_fmax does not exist for a regression target matrix -- select on loss instead.
