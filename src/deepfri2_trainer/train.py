@@ -14,18 +14,26 @@ from .utils.training import MCLOSS_NAMES, count_trainable_parameters, train_mode
 
 
 def build_loss_kwargs(cfg: RunConfig, targets: Targets, device: str | torch.device) -> dict[str, Any]:
-    """Translate the ``training.loss`` config block into ``train_model`` arguments."""
+    """Translate the ``training.loss`` config block into ``train_model`` arguments.
+
+    An unconfigured loss (``name: null``) falls back to ``WeightedFocalLoss`` for a
+    classification target matrix, and to plain MSE for a regression one.
+    """
     loss_cfg = cfg.training["loss"]
     name = loss_cfg.get("name")
+    if name is None and targets.task_kind == "regression":
+        name = "MSE"
 
     if name is None:
         loss_fn_kwargs = None          # train_model falls back to WeightedFocalLoss
+    elif name == "MSE":
+        loss_fn_kwargs = None
     elif name in MCLOSS_NAMES:
         loss_fn_kwargs = {"A": targets.adjacency.to(device), **(loss_cfg.get("kwargs") or {})}
     else:
         raise ValueError(
-            f"unsupported loss {name!r}; configs may use one of {sorted(MCLOSS_NAMES)} or "
-            "null (null selects WeightedFocalLoss)"
+            f"unsupported loss {name!r}; configs may use one of {sorted(MCLOSS_NAMES)}, 'MSE', "
+            "or null (null selects WeightedFocalLoss, or MSE for a regression target matrix)"
         )
 
     return {
@@ -71,5 +79,6 @@ def run_training(
         on_epoch_end=on_epoch_end,
         propagate=propagate,
         fmax_max_proteins=cfg.training.get("fmax_max_proteins", 10_000),
+        task_kind=targets.task_kind,
         **loss_args,
     )

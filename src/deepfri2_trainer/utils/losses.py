@@ -3,6 +3,8 @@
 - ``WeightedFocalLoss`` -- focal loss with per-GO-term class weights; structure model.
 - ``MCLossDAG``         -- max constraint loss (MCLoss) over the direct GO edges; sequence and
   fusion models.
+
+A custom regression target matrix uses plain ``torch.nn.MSELoss`` instead.
 """
 
 import numpy as np
@@ -35,7 +37,7 @@ class WeightedFocalLoss(nn.Module):
         else:
             self.alpha = None
 
-    def forward(self, inputs, targets, model=None):
+    def forward(self, inputs, targets):
         ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
         pt = torch.exp(-ce_loss)
 
@@ -159,7 +161,7 @@ class MCLossDAG(nn.Module):
                     depth[v] = nv
         return max(depth)
 
-    def forward(self, logits, targets, model=None):
+    def forward(self, logits, targets):
         outputs = torch.sigmoid(logits)
         targets = targets.to(dtype=outputs.dtype)
 

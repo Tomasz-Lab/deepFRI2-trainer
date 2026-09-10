@@ -42,6 +42,22 @@ preprocess:
   # Append-only record of every preprocessing run, the counterpart of runs_dir/training.log
   log_file: '{project_location}/production/training/data/data.log'
 
+# Custom (non-GO) classification/regression tasks. Unused by the GO flow.
+custom:
+  # Only read by `--csv --structures` (build embeddings/distograms from raw MMCIF via FRIdata).
+  # `--train-dataset`/`--eval-dataset`/`--test-dataset` (predefined splits, e.g. PEER) never
+  # touch these -- they take already-built FRIdata datasets directly, so leaving them null is
+  # fine unless you also use --structures.
+  # FRIdata's config.json `data_path` should point at the SAME `toolbox/data` root as
+  # `layout.datasets` below, so the dataset it builds lands where `get_data_config` looks.
+  fridata_src: null
+  fridata_config: null
+  fridata_python: python3
+  embedder: esm2_t33_650M_UR50D
+  # Where target matrices are written, relative to `project_location` (like `layout:` below).
+  # Read by every custom-task run regardless of which of the above it uses.
+  out_dir: production/training/data/custom_target_matrix
+
 # Data-tree layout, relative to `project_location`. Placeholders are filled from the
 # data config: {dataset_name}, {params}, {data_version}, {ontology}, {threshold}.
 layout:
