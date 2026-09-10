@@ -109,23 +109,18 @@ python train.py --task my_task --set-file .../my_task/overrides.yaml
 
 The CSV's first column (configurable with `--id-column`) is the protein id, and by default a
 single column named `label` is the target -- pass `--label-columns` for a multi-task CSV or a
-differently-named label column; a CSV can carry other columns that are not labels (a benchmark
-like PEER also has a `sequence` column), so "every column but the id" is not assumed. Whether
-the task is classification (0/1) or regression (real-valued) is detected from the label
-column(s)' own dtype, and a run trains one or the other -- not both, so a CSV mixing 0/1 and
-real-valued label columns is rejected: split it into two CSVs. `--structures` is a
+differently-named label column. Whether the task is binary classification or regression is
+detected from the label dtype.
+`--structures` is a
 directory of MMCIF structures, turned into embeddings and distograms by
-[FRIdata](https://github.com/Tomasz-Lab/FRIdata) (`configs/paths.yaml :: custom`); an
+[FRIdata](https://github.com/Tomasz-Lab/FRIdata) (`configs/paths.yaml :: custom`). An
 already-built FRIdata dataset can be passed directly with `--dataset` instead. The train/eval
 split reuses the same MMseqs2 homology-aware clustering as the GO flow.
 
 This writes a target matrix under `configs/paths.yaml :: custom.out_dir` plus an
 `overrides.yaml` next to it, carrying the config a training run needs (dataset name, label
-kind); pass it to `train.py` with `--set-file`. Everything else -- `--stages`, `--weights-*`,
-checkpoint selection, outputs -- works exactly as it does for a GO run; there is simply no test
-or CAZy set (those TSVs are not written) and, for a regression task, no sigmoid on predictions
-and no Fmax (`training.selection_metric` should be `eval_loss`, which the generated overrides
-already set).
+kind); pass it to `train.py` with `--set-file`. Everything else (`--stages`, `--weights-*`,
+checkpoint selection, outputs) works exactly as it does for a GO run.
 
 ### Predefined splits (PEER, FLIP, ...)
 
