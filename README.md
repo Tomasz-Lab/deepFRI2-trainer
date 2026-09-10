@@ -120,7 +120,14 @@ split reuses the same MMseqs2 homology-aware clustering as the GO flow.
 This writes a target matrix under `configs/paths.yaml :: custom.out_dir` plus an
 `overrides.yaml` next to it, carrying the config a training run needs (dataset name, label
 kind); pass it to `train.py` with `--set-file`. Everything else (`--stages`, `--weights-*`,
-checkpoint selection, outputs) works exactly as it does for a GO run.
+checkpoint selection, outputs) works exactly as it does for a GO run -- except there is no CAZy
+set (that benchmark is GO-specific) and, for a regression task, no sigmoid on predictions and no
+Fmax (`training.selection_metric` should be `eval_loss`, which the generated overrides set).
+
+Regression is scored with MSE, RMSE, MAE, R2, Pearson and Spearman (all per task, then
+averaged); classification with the GO flow's own macro/micro precision/recall/F1 plus accuracy,
+AUROC and a "regular" macro F1 (undefined classes count as 0, not skipped) -- all logged to the
+console and wandb every epoch, computed in `utils/training.py`.
 
 ### Predefined splits (PEER, FLIP, ...)
 
@@ -145,6 +152,11 @@ dataset (train + eval) or the test dataset. That merge is a real copy, not just 
 rewrite: `DeepFRIDataset` looks an embedding or distogram up by protein id *inside* the HDF5
 file too, not only by file path, so the prefixed id has to actually exist as a key in the
 merged file -- for both the trainval and the test dataset alike.
+
+All three splits are required, on purpose: a benchmark split is not something to guess at or
+partially honour. Train and eval are never reshuffled or merged back together to redraw the
+boundary -- `train.tsv`/`eval.tsv` list exactly the ids their originating CSV had, and test
+stays in its own, separate dataset throughout.
 
 ## Architectures: owned here, checked against inference
 

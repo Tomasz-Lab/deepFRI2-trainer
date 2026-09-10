@@ -485,17 +485,21 @@ def run_with_predefined_splits(
     label_columns: list[str] | None = None,
     command: str | None = None,
 ) -> Path:
-    """Build a target matrix that respects an existing train/eval(/test) split, instead of
+    """Build a target matrix that respects an existing train/eval/test split, instead of
     computing one with MMseqs2 -- for a benchmark (like PEER) that already ships one.
 
-    ``splits`` maps a split name -- ``"train"`` and ``"eval"`` are required, ``"test"`` optional
-    -- to that split's ``(labels csv, prebuilt FRIdata dataset directory)``. Every split's CSV
-    must agree on label columns and task kind. Ids are prefixed by split name before merging, so
-    the same numbering FRIdata's per-split directories reuse (PEER's ``train/0.cif``,
-    ``valid/0.cif``, ...) does not collide once combined.
+    ``splits`` maps each of ``"train"``, ``"eval"`` and ``"test"`` (all three required -- a
+    benchmark split is not something to guess at, or partially honour) to that split's
+    ``(labels csv, prebuilt FRIdata dataset directory)``. Every split's CSV must agree on label
+    columns and task kind. Ids are prefixed by split name before merging, so the same numbering
+    FRIdata's per-split directories reuse (PEER's ``train/0.cif``, ``valid/0.cif``,
+    ``test/0.cif``, ...) does not collide once combined. Train and eval are merged into one
+    trainval dataset and then split back apart by ``train.tsv``/``eval.tsv`` -- exactly the ids
+    each one came in with, never reshuffled -- and test gets its own, separate dataset; nothing
+    here ever moves a protein between splits.
     """
-    if not {"train", "eval"} <= set(splits):
-        raise ValueError("splits needs at least 'train' and 'eval'")
+    if not {"train", "eval", "test"} <= set(splits):
+        raise ValueError("splits needs 'train', 'eval' and 'test'")
 
     out_dir = cfg.task_dir(task)
     command = command or f"custom_preprocess.run_with_predefined_splits(task={task!r})"
@@ -536,11 +540,9 @@ def run_with_predefined_splits(
         protein_vectors = {**per_split["train"], **per_split["eval"]}
         note(task, f"trainval: {len(protein_vectors)} proteins -> {trainval_dir}")
 
-        protein_vectors_test = None
-        if "test" in splits:
-            test_dir = merge_datasets({"test": splits["test"][1]}, cfg.datasets_dir / f"{task}_test")
-            protein_vectors_test = per_split["test"]
-            note(task, f"test: {len(protein_vectors_test)} proteins -> {test_dir}")
+        test_dir = merge_datasets({"test": splits["test"][1]}, cfg.datasets_dir / f"{task}_test")
+        protein_vectors_test = per_split["test"]
+        note(task, f"test: {len(protein_vectors_test)} proteins -> {test_dir}")
 
         rule("split")
         split_dir = out_dir / "mmseqs_output"
@@ -562,7 +564,7 @@ def run_with_predefined_splits(
         overrides_path.write_text(yaml.safe_dump(
             cfg.run_overrides(
                 task, task, task_kind, id_convention=None, trainval_suffix="_trainval",
-                testset_suffix="_test" if protein_vectors_test is not None else "",
+                testset_suffix="_test",
             ),
             sort_keys=False,
         ))
