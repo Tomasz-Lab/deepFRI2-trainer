@@ -91,6 +91,42 @@ new model.
 Every run appends its whole console output to `data/data.log`, under a header giving the
 date and the exact command.
 
+## Custom classification/regression tasks
+
+The same `sequence`/`structure`/`fusion` architectures also train on an arbitrary task, given a
+plain CSV instead of the GO graph and annotation tables:
+
+```csv
+protein_id,label
+P12345,1
+P67890,0
+```
+
+```bash
+python preprocess.py --csv labels.csv --structures /path/to/mmcifs --task my_task
+python train.py --task my_task --set-file .../my_task/overrides.yaml
+```
+
+The CSV's first column (configurable with `--id-column`) is the protein id, and by default a
+single column named `label` is the target -- pass `--label-columns` for a multi-task CSV or a
+differently-named label column; a CSV can carry other columns that are not labels (a benchmark
+like PEER also has a `sequence` column), so "every column but the id" is not assumed. Whether
+the task is classification (0/1) or regression (real-valued) is detected from the label
+column(s)' own dtype, and a run trains one or the other -- not both, so a CSV mixing 0/1 and
+real-valued label columns is rejected: split it into two CSVs. `--structures` is a
+directory of MMCIF structures, turned into embeddings and distograms by
+[FRIdata](https://github.com/Tomasz-Lab/FRIdata) (`configs/paths.yaml :: custom`); an
+already-built FRIdata dataset can be passed directly with `--dataset` instead. The train/eval
+split reuses the same MMseqs2 homology-aware clustering as the GO flow.
+
+This writes a target matrix under `configs/paths.yaml :: custom.out_dir` plus an
+`overrides.yaml` next to it, carrying the config a training run needs (dataset name, label
+kind); pass it to `train.py` with `--set-file`. Everything else -- `--stages`, `--weights-*`,
+checkpoint selection, outputs -- works exactly as it does for a GO run; there is simply no test
+or CAZy set (those TSVs are not written) and, for a regression task, no sigmoid on predictions
+and no Fmax (`training.selection_metric` should be `eval_loss`, which the generated overrides
+already set).
+
 ## Architectures: owned here, checked against inference
 
 Model definitions live in [`src/deepfri2_trainer/model.py`](src/deepfri2_trainer/model.py), the
@@ -539,6 +575,7 @@ src/deepfri2_trainer/
     outputs.py                wandb session, run dir, artifacts, log.txt, training.log
     import_released.py        import released deepFRI2 checkpoints into runs_dir
     preprocess.py             target matrix / split / CAZy target construction
+    custom_preprocess.py      target matrix from a CSV (custom classification/regression tasks)
     sanity.py                 sanity & validation checks
     utils/                    dataloader, training loop, losses
         target_matrix.py      protein -> GO-term supervision from the annotation tables

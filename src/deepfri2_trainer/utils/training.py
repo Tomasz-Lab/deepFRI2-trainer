@@ -17,7 +17,7 @@ import tqdm
 import wandb
 from scipy.special import expit as sigmoid
 
-from .losses import MCLossDAG, WeightedFocalLoss
+from .losses import MCLossDAG, RegressionLoss, WeightedFocalLoss
 
 # `MCMLossDAG` is the pre-rename spelling, still present in archived run configs.
 MCLOSS_NAMES = ("MCLossDAG", "MCMLossDAG")
@@ -76,12 +76,14 @@ def initialize_training(
             raw_violation_weight=loss_fn_kwargs.get("raw_violation_weight", 0.0),
             raw_violation_margin=loss_fn_kwargs.get("raw_violation_margin", 0.0),
         )
+    elif loss_fn_name == "MSE":
+        loss_fn = RegressionLoss()
     elif loss_fn_name is None:
         loss_fn = WeightedFocalLoss(alpha=weights)
     else:
         raise ValueError(
-            f"unknown loss_fn_name {loss_fn_name!r}; expected one of {sorted(MCLOSS_NAMES)} "
-            "or None (None selects WeightedFocalLoss)"
+            f"unknown loss_fn_name {loss_fn_name!r}; expected one of {sorted(MCLOSS_NAMES)}, "
+            "'MSE', or None (None selects WeightedFocalLoss)"
         )
 
     return optimizer, loss_fn
@@ -288,6 +290,31 @@ def calculate_metrics(predictions, targets, threshold=0.3):
     )
 
 
+def calculate_regression_metrics(predictions, targets):
+    """Per-task MSE / MAE / R2, plus the mean of each -- the regression counterpart of
+    ``calculate_metrics``. Returns the same ``(a, b, c, extras)`` shape so a training record
+    stays uniform regardless of task kind: ``a, b, c`` are the mean MSE, mean MAE and mean R2.
+
+    R2 is undefined for a task with zero variance in the eval split (a constant target); such
+    tasks are excluded from the mean, the same way ``calculate_metrics`` skips undefined terms.
+    """
+    diff = predictions.astype(np.float64) - targets.astype(np.float64)
+    mse = (diff ** 2).mean(axis=0)
+    mae = np.abs(diff).mean(axis=0)
+    variance = targets.astype(np.float64).var(axis=0)
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r2 = np.where(variance > 0, 1 - mse / np.where(variance > 0, variance, 1), np.nan)
+
+    extras = {
+        "mse_mean": float(mse.mean()),
+        "mae_mean": float(mae.mean()),
+        "r2_mean": float(np.nanmean(r2)),
+        "tasks": int(predictions.shape[1]),
+    }
+    return float(mse.mean()), float(mae.mean()), float(np.nanmean(r2)), extras
+
+
 def calculate_fmax(predictions, targets, propagate=None, steps: int = 51,
                    max_proteins: int | None = None, seed: int = 0):
     """Protein-centric Fmax -- the CAFA metric, computed on the eval split.
@@ -348,6 +375,7 @@ def log_metrics(
     eval_fmax=None,
     train_fmax=None,
     seconds=None,
+    task_kind="classification",
 ):
     """Log metrics to console and wandb if enabled."""
     metrics = {
@@ -357,18 +385,19 @@ def log_metrics(
         "train_predictions_std": np.std(all_predictions),
         "eval_predictions_mean": np.mean(eval_predictions),
         "eval_predictions_std": np.std(eval_predictions),
-        "train/precision": prfs_train[0],
-        "train/recall": prfs_train[1],
-        "train/f1": prfs_train[2],
-        "eval/precision": prfs_eval[0],
-        "eval/recall": prfs_eval[1],
-        "eval/f1": prfs_eval[2],
     }
-    # Micro averages and the class counts behind each macro average: the macro numbers are
-    # each over a different subset of GO terms, so they cannot be combined with each other.
-    for split, prfs in (("train", prfs_train), ("eval", prfs_eval)):
-        for key, value in (prfs[3] or {}).items():
-            metrics[f"{split}/{key}"] = value
+    train_label, eval_label = ("Train", "Eval ")
+    if task_kind == "regression":
+        metrics["train/mse"], metrics["train/mae"], metrics["train/r2"] = prfs_train[:3]
+        metrics["eval/mse"], metrics["eval/mae"], metrics["eval/r2"] = prfs_eval[:3]
+    else:
+        metrics["train/precision"], metrics["train/recall"], metrics["train/f1"] = prfs_train[:3]
+        metrics["eval/precision"], metrics["eval/recall"], metrics["eval/f1"] = prfs_eval[:3]
+        # Micro averages and the class counts behind each macro average: the macro numbers are
+        # each over a different subset of GO terms, so they cannot be combined with each other.
+        for split, prfs in (("train", prfs_train), ("eval", prfs_eval)):
+            for key, value in (prfs[3] or {}).items():
+                metrics[f"{split}/{key}"] = value
 
     if eval_fmax is not None:
         metrics["eval/fmax"], metrics["eval/fmax_threshold"] = eval_fmax
@@ -383,13 +412,19 @@ def log_metrics(
     print(f"Epoch {epoch + 1}" + (f"  [{format_duration(seconds)}]" if seconds else ""))
     print(f"Train - Loss: {train_loss:.4f}")
     print(f"Eval  - Loss: {eval_loss:.4f}")
+
+    if task_kind == "regression":
+        for split, prfs in ((train_label, prfs_train), (eval_label, prfs_eval)):
+            print(f"{split} - MSE/MAE/R2: {prfs[0]:.4f} / {prfs[1]:.4f} / {prfs[2]:.4f}")
+        return
+
     if eval_fmax is not None:
         train_part = f"  train {train_fmax[0]:.4f}" if train_fmax is not None else ""
         print(
             f"Eval  - Fmax : {eval_fmax[0]:.4f} (tau={eval_fmax[1]:.2f})  <- CAFA proxy"
             f"{train_part}"
         )
-    for split, prfs in (("Train", prfs_train), ("Eval ", prfs_eval)):
+    for split, prfs in ((train_label, prfs_train), (eval_label, prfs_eval)):
         extras = prfs[3] or {}
         print(
             f"{split} - macro P/R/F1: {prfs[0]:.4f} / {prfs[1]:.4f} / {prfs[2]:.4f}"
@@ -420,6 +455,7 @@ def train_model(
     on_epoch_end=None,
     propagate=None,
     fmax_max_proteins: int | None = 10_000,
+    task_kind: str = "classification",
 ):
     """
     Universal training function that can use embeddings, distograms, or both.
@@ -441,6 +477,9 @@ def train_model(
         propagate: Optional DAG propagator; enables the protein-centric train/eval Fmax.
         fmax_max_proteins: Cap on proteins used for Fmax (fixed subsample, comparable across
             epochs); keeps the train-split Fmax affordable.
+        task_kind: "classification" (macro P/R/F1 + Fmax, the GO default) or "regression"
+            (MSE/MAE/R2, no Fmax -- ``eval_fmax``/``train_fmax`` stay ``(nan, nan)`` so the
+            history record keeps the same shape either way).
 
     Returns:
         Trained model and evaluation metrics, including ``history``: one record per epoch.
@@ -485,14 +524,19 @@ def train_model(
                 max_steps_per_epoch=max_steps_per_epoch,
             )
 
-            prfs_train = calculate_metrics(all_predictions, all_targets, threshold)
-            prfs_eval = calculate_metrics(eval_predictions, eval_targets, threshold)
-            eval_fmax = calculate_fmax(
-                eval_predictions, eval_targets, propagate, max_proteins=fmax_max_proteins
-            )
-            train_fmax = calculate_fmax(
-                all_predictions, all_targets, propagate, max_proteins=fmax_max_proteins
-            )
+            if task_kind == "regression":
+                prfs_train = calculate_regression_metrics(all_predictions, all_targets)
+                prfs_eval = calculate_regression_metrics(eval_predictions, eval_targets)
+                eval_fmax = train_fmax = (float("nan"), float("nan"))
+            else:
+                prfs_train = calculate_metrics(all_predictions, all_targets, threshold)
+                prfs_eval = calculate_metrics(eval_predictions, eval_targets, threshold)
+                eval_fmax = calculate_fmax(
+                    eval_predictions, eval_targets, propagate, max_proteins=fmax_max_proteins
+                )
+                train_fmax = calculate_fmax(
+                    all_predictions, all_targets, propagate, max_proteins=fmax_max_proteins
+                )
 
             log_metrics(
                 train_loss,
@@ -508,6 +552,7 @@ def train_model(
                 eval_fmax=eval_fmax,
                 train_fmax=train_fmax,
                 seconds=time.perf_counter() - epoch_started,
+                task_kind=task_kind,
             )
 
             record = {

@@ -3,12 +3,30 @@
 - ``WeightedFocalLoss`` -- focal loss with per-GO-term class weights; structure model.
 - ``MCLossDAG``         -- max constraint loss (MCLoss) over the direct GO edges; sequence and
   fusion models.
+- ``RegressionLoss``    -- plain MSE, for a custom regression target matrix.
 """
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class RegressionLoss(nn.Module):
+    """Plain MSE, wrapped to accept the same ``(logits, targets, model)`` call every other loss
+    here does -- ``nn.MSELoss`` on its own does not take that third argument.
+
+    Computed in float32 regardless of the autocast dtype the model ran in: a regression target
+    is not a 0/1 probability, so the precision loss from bfloat16/float16 matters more here, and
+    some backends do not implement MSE for those dtypes at all.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.mse = nn.MSELoss()
+
+    def forward(self, logits, targets, model=None):
+        return self.mse(logits.float(), targets.float())
 
 
 class WeightedFocalLoss(nn.Module):

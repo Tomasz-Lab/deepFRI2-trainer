@@ -348,8 +348,10 @@ def load_config(
     """Load and merge the YAML configs for one training run."""
     if model_type not in MODEL_TYPES:
         raise ValueError(f"model_type must be one of {MODEL_TYPES}, got {model_type!r}")
-    if ontology not in ONTOLOGIES:
-        raise ValueError(f"ontology must be one of {ONTOLOGIES}, got {ontology!r}")
+    # A GO namespace (MF/CC/BP) or a custom task name -- both are just a namespacing string for
+    # run directories and `weights.<ontology>` config blocks, so any non-empty one is accepted.
+    if not ontology:
+        raise ValueError(f"ontology must be a non-empty string, got {ontology!r}")
     if train_on not in TRAIN_ON:
         raise ValueError(f"train_on must be one of {TRAIN_ON}, got {train_on!r}")
 
