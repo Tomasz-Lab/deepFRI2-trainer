@@ -13,6 +13,7 @@ The pipeline this repository sits in (last three):
 | **`preprocess.py`** | target matrices, ground truth, train/eval split | `data/target_matrix/` |
 | **`train.py`** | checkpoints, predictions | `runs_dir` |
 | **`validate.ipynb`** | CAFA scores, figures, tables | `figures/` |
+| **`calibrate.py`** | per-GO-term precision/recall curves | `runs_dir` |
 
 `train.py` trains the sub-models of one ontology (MF / CC / BP) in dependency order:
 
@@ -33,6 +34,8 @@ python train.py --import-released                    # once: import the released
 python train.py --ontology MF                        # all three models
 python train.py --ontology MF --stages fusion        # just the fusion gate
 python train.py --ontology BP --train-on train+eval  # production models trained on everything
+
+python calibrate.py --ontology MF                    # per-GO-term curves for the interpretability reports
 ```
 
 A complete model is nine runs: 3 ontologies x 3 stages. `python train.py --help` lists every
@@ -139,6 +142,7 @@ checkout is around.
 ```bash
 python tests/test_model_equivalence.py     # architecture fidelity + parity
 python tests/test_metrics.py               # logged P/R/F1 vs sklearn
+python tests/test_calibration.py           # calibration sweep vs sklearn, F-max vs brute force
 ```
 
 - the trainer architectures produce bit-identical logits to the model classes copied verbatim
@@ -146,7 +150,10 @@ python tests/test_metrics.py               # logged P/R/F1 vs sklearn
 - the parity check reports them identical to inference, and reports a deliberately modified
   architecture as diverged and undeployable, so the guard is known to work;
 - all nine released deepFRI2 checkpoints load into trainer-built models with `strict=True`;
-- the metrics match `sklearn.metrics.precision_recall_fscore_support`.
+- the metrics match `sklearn.metrics.precision_recall_fscore_support`;
+- the calibration grid matches `sklearn.metrics.precision_score` / `recall_score` at every
+  threshold, and its F-max matches a brute-force sweep over every distinct score -- including for
+  terms with no ground truth, terms everybody carries, and saturated score vectors full of ties.
 
 The fusion stage re-checks fidelity against real data: the frozen branches must reproduce the
 stand-alone sub-models' test predictions to 1e-6.
@@ -157,7 +164,7 @@ Hyperparameters and paths are not command-line arguments. Three YAML files are m
 
 | File | Contents |
 |---|---|
-| `paths.yaml` | machine-specific roots (`project_location`, `deepfri2_src`, `runs_dir`) and the data-tree layout. **The only file to edit when moving hosts.** |
+| `paths.yaml` | machine-specific roots (`project_location`, `deepfri2_src`, `runs_dir`) and the data-tree layout. **The only file to edit when moving hosts.** Its `layout:` block is the single definition of where every data file lives: training resolves it through `RunConfig`, and the CAFA evaluation, `calibrate.py` and `validate.ipynb` through `EvalPaths.from_configs()`. |
 | `data.yaml` | dataset / GO versions, annotation threshold, `max_seq_len`, `sigma_dist`, batch size, workers |
 | `sequence.yaml`, `structure.yaml`, `fusion.yaml` | architecture, optimizer, loss, epochs, initial weights |
 
@@ -413,7 +420,8 @@ With `--no-wandb` the run name falls back to `local-<timestamp>` and nothing is 
 
 To promote a run into deepFRI2, copy `<run>.pth` and `labels_<run>.json` into
 `deepFRI2/params/<ontology>/` and add the run name to `MODEL_NAMES` in
-`deepFRI2/src/deepFRI2/config.py`.
+`deepFRI2/src/deepFRI2/config.py`. Copy `calibration_<fusion run>.json` too if the triple has
+been calibrated — see [Calibration](#calibration) below.
 
 ## CAFA evaluation
 
@@ -427,11 +435,12 @@ checkout is at hand, point `CAFA_EVALUATOR_SRC` at its `src` directory.
 
 The mechanics are in [`utils/evaluator.py`](src/deepfri2_trainer/utils/evaluator.py) and
 [`utils/figures.py`](src/deepfri2_trainer/utils/figures.py); everything specific to a machine, a
-dataset or a set of competitors — the path templates, the run names, the method names and the
-colours — is in the notebook's **Setup** cell, so the modules carry no local paths.
+dataset or a set of competitors — the run names, the method names and the colours — is in the
+notebook's **Setup** cell; the paths themselves come from `configs/paths.yaml`, so neither the
+notebook nor the modules carry a local path.
 
 ```python
-paths = EvalPaths.from_configs(LAYOUT)          # versions and roots from configs/
+paths = EvalPaths.from_configs()                # layout, roots and versions from configs/
 
 ev = CafaEvaluation(paths)
 ev.add_runs({"MF": {"deepFRI2 (fusion)": "dainty-deluge-829"}})   # wandb run names
@@ -465,11 +474,41 @@ Two conventions worth knowing:
 
 - Metrics are weighted by information content by default. The IA table
   (`IA_<data version>_HQ.tsv`) comes from the InformationAccretion repository, which is not yet
-  wired in — its location is the `ia` entry of `LAYOUT` in the notebook. Without the file, only
-  the unweighted metrics are available.
+  wired in — its location is the `ia` entry of `layout:` in `configs/paths.yaml`. Without the
+  file, only the unweighted metrics are available.
 - `summary()` reports `smin` as the minimum of the column it summarises. CAFA-evaluator's own
   `best` tables pick the threshold by the *unweighted* `s` and print `s_w` there, which is
   slightly higher than the minimum of `s_w`.
+
+## Calibration
+
+CAFA reports one number per ontology: how good the model is on average. It does not say whether a
+given score on a given GO term is high, and that is what a reader of a deepFRI2 interpretability
+report actually needs — a fusion score of 0.92 can mean 39% precision on one term and 95% on
+another, because a term carried by 40% of the training proteins and one carried by 0.5% peak at
+completely different thresholds.
+
+[`calibrate.py`](calibrate.py) sweeps the decision threshold **per GO term, per sub-model and per
+split** over the prediction TSVs a run already wrote, and stores the curves next to the fusion
+checkpoint, named the way `labels_<run>.json` is:
+
+```bash
+python calibrate.py --dry-run            # resolved paths + every input checked
+python calibrate.py                      # the released models (deepFRI2 MODEL_NAMES), all ontologies
+python calibrate.py --ontology MF --sequence <run_sequence> --structure <run_structure> --fusion <run_fusion>
+```
+
+```
+<runs_dir>/MF__fusion__<run_fusion>/calibration_<run_fusion>.json
+```
+
+Copy that file into `deepFRI2/params/<ontology>/` along with the checkpoints. deepFRI2's
+`interpret.py` picks it up automatically and opens every report with a row of three panels —
+fusion, sequence, structure — showing precision, recall and F1 against the threshold, with a
+vertical line at the score *this* protein got. Without the file the reports are written exactly as
+before, minus that row.
+
+`eval` and `test` disagreeing on a term is almost always sample size, not a real gap. 
 
 ## Logged metrics
 
@@ -526,6 +565,7 @@ configs/                      paths, data versions, per-model hyperparameters
 environment.yml               conda environment (GPU)
 preprocess.py                 CLI entry point: inputs -> target matrix + split
 train.py                      CLI entry point: training
+calibrate.py                  CLI entry point: per-GO-term calibration for the reports
 validate.ipynb                CAFA evaluation: figures and tables for the paper
 src/deepfri2_trainer/
     model.py                  deepFRI2 model definitions
@@ -539,6 +579,7 @@ src/deepfri2_trainer/
     outputs.py                wandb session, run dir, artifacts, log.txt, training.log
     import_released.py        import released deepFRI2 checkpoints into runs_dir
     preprocess.py             target matrix / split / CAZy target construction
+    calibrate.py              per-GO-term threshold sweep -> calibration_<run>.json
     sanity.py                 sanity & validation checks
     utils/                    dataloader, training loop, losses
         target_matrix.py      protein -> GO-term supervision from the annotation tables

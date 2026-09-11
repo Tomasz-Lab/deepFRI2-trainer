@@ -44,13 +44,32 @@ preprocess:
 
 # Data-tree layout, relative to `project_location`. Placeholders are filled from the
 # data config: {dataset_name}, {params}, {data_version}, {ontology}, {threshold}.
+#
+# One block for the whole repository: training reads it through `RunConfig`, and the CAFA
+# evaluation, `calibrate.py` and `validate.ipynb` read it through `EvalPaths.from_configs()`.
+# Not every consumer needs every entry -- training never opens `competitors`, the evaluation
+# never opens `datasets` -- but a path that two of them do share is written down once, so moving
+# the data tree is still an edit to this file alone.
 layout:
+  # -- training inputs --------------------------------------------------------------------
   # Embedding / distogram index directories (contain dataset.json, embeddings.idx, ...)
   datasets: toolbox/data/datasets
-  # Target matrix (go_indices, protein_vectors, weights, adjacency, ...) -- written by
-  # preprocess.py into `preprocess.out_dir`; keep these three in sync with it.
+  # Target matrix (go_indices, protein_vectors, weights, adjacency, grand truth, ...) -- written
+  # by preprocess.py into `preprocess.out_dir`; keep these three in sync with it.
   target_matrix: production/training/data/target_matrix/{dataset_name}/{params}/target_matrix
   # train/eval split (train.tsv, eval.tsv)
   split: production/training/data/target_matrix/{dataset_name}/{params}/mmseqs_output
   # CAZy test-set target matrix
   cazy_target_matrix: production/training/data/target_matrix/cazy/{data_version}/uniprot/{ontology}_{threshold}
+
+  # -- evaluation and calibration ---------------------------------------------------------
+  # GO graph CAFA-evaluator scores against
+  obo: production/training/data/inputs/{data_version}/graphs/{go_version}/go.obo
+  # Information accretion. Without this file only the unweighted CAFA metrics are available.
+  ia: production/training/data/inputs/{data_version}/information_content/IA_{data_version}_HQ.tsv
+  # Test-set proteins that have an experimental structure; the test split is scored on these
+  struct_test_ids: production/training/data/inputs/{data_version}/testset/proteins.txt
+  # deepFRI2 prediction TSVs are looked up here and in the run directories under `runs_dir`
+  predictions: training/results/predictions
+  # third-party predictions, one directory per split
+  competitors: training/results/competitors
