@@ -26,6 +26,7 @@ class Targets:
     weights: Any                         # per-GO-term class weights
     adjacency: torch.Tensor              # direct GO adjacency, child -> parent
     task_kind: str = "classification"    # "classification" or "regression"
+    is_custom: bool = False              # False for GO -- a custom target matrix wrote task.json
 
     @property
     def num_labels(self) -> int:
@@ -69,7 +70,8 @@ def load_targets(cfg: RunConfig) -> Targets:
 
     task_kind = "classification"
     task_file = tm / "task.json"
-    if task_file.is_file():
+    is_custom = task_file.is_file()
+    if is_custom:
         task_kind = json.loads(task_file.read_text())["task_kind"]
 
     targets = Targets(
@@ -80,6 +82,7 @@ def load_targets(cfg: RunConfig) -> Targets:
         weights=_load_pickle_for_ontology(tm / "weights.pkl", ont),
         adjacency=_load_pickle_for_ontology(tm / "adjacency.pkl", ont),
         task_kind=task_kind,
+        is_custom=is_custom,
     )
 
     if protein_vectors_cazy is not None:

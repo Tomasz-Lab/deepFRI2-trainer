@@ -221,7 +221,7 @@ def evaluate_model(
     return eval_loss, eval_predictions, eval_targets
 
 
-def calculate_metrics(predictions, targets, threshold=0.3):
+def calculate_metrics(predictions, targets, threshold=0.3, compute_auroc=False):
     """Macro-averaged precision / recall / F1 over GO terms, plus micro averages.
 
     Returns ``(macro_precision, macro_recall, macro_f1, extras)``.
@@ -255,10 +255,11 @@ def calculate_metrics(predictions, targets, threshold=0.3):
     Vectorized numpy, ~17x faster than sklearn at this problem size (~110K proteins x 5467 GO
     terms) and numerically identical to it (asserted in tests/test_metrics.py).
 
-    ``extras`` also carries ``accuracy``, ``auroc`` and ``macro_f1`` (the "regular" macro F1,
-    zero for an undefined class rather than skipped). AUROC is computed from a single
-    ``rankdata`` call over every class at once rather than sklearn's per-class loop, so it stays
-    cheap even at GO's label count.
+    ``extras`` also carries ``accuracy`` and ``macro_f1`` (the "regular" macro F1, zero for an
+    undefined class rather than skipped) -- cheap enough to always compute. ``auroc`` is only
+    added when ``compute_auroc=True``: it is plain ``sklearn.metrics.roc_auc_score`` per class,
+    which loops in Python per class and is too slow to run at GO's label count, so custom (non-GO)
+    tasks ask for it explicitly instead of it running unconditionally.
     """
     preds_bin = (sigmoid(predictions) >= threshold).astype(np.float64)
     t = targets.astype(np.float64)
@@ -299,19 +300,6 @@ def calculate_metrics(predictions, targets, threshold=0.3):
         f1_reg_denom = 2 * tp + fp + fn
         f1_regular = np.where(f1_reg_denom > 0, 2 * tp / np.where(f1_reg_denom > 0, f1_reg_denom, 1), 0.0)
 
-        # AUROC per class via the rank-sum (Mann-Whitney U) identity, vectorized over every
-        # class at once with one `rankdata` call -- avoids sklearn's per-class Python loop,
-        # which at ~5000 GO terms would cost a lot more than this.
-        from scipy.stats import rankdata  # noqa: PLC0415
-        ranks = rankdata(predictions, axis=0)
-        n_pos, n_neg = support, n - support
-        auroc_denom = n_pos * n_neg
-        auroc = np.where(
-            auroc_denom > 0,
-            ((ranks * t).sum(axis=0) - n_pos * (n_pos + 1) / 2) / np.where(auroc_denom > 0, auroc_denom, 1),
-            np.nan,
-        )
-
     extras = {
         "precision_micro": float(micro_precision),
         "recall_micro": float(micro_recall),
@@ -321,8 +309,17 @@ def calculate_metrics(predictions, targets, threshold=0.3):
         "classes_total": int(tp.shape[0]),
         "accuracy": float(accuracy.mean()),
         "macro_f1": float(f1_regular.mean()),
-        "auroc": float(np.nanmean(auroc)),
     }
+
+    if compute_auroc:
+        from sklearn.metrics import roc_auc_score  # noqa: PLC0415
+
+        aurocs = [
+            roc_auc_score(t[:, i], predictions[:, i])
+            for i in range(t.shape[1])
+            if 0 < support[i] < t.shape[0]  # both classes present -- else AUROC is undefined
+        ]
+        extras["auroc"] = float(np.mean(aurocs)) if aurocs else float("nan")
     return (
         float(np.nanmean(precision)),
         float(np.nanmean(recall)),
@@ -523,6 +520,7 @@ def train_model(
     propagate=None,
     fmax_max_proteins: int | None = 10_000,
     task_kind: str = "classification",
+    compute_auroc: bool = False,
 ):
     """
     Universal training function that can use embeddings, distograms, or both.
@@ -547,6 +545,9 @@ def train_model(
         task_kind: "classification" (macro P/R/F1 + Fmax, the GO default) or "regression"
             (MSE/MAE/R2, no Fmax -- ``eval_fmax``/``train_fmax`` stay ``(nan, nan)`` so the
             history record keeps the same shape either way).
+        compute_auroc: Add per-class AUROC to the classification metrics -- sklearn, so only
+            for a custom (non-GO) target matrix; too slow to run unconditionally at GO's label
+            count.
 
     Returns:
         Trained model and evaluation metrics, including ``history``: one record per epoch.
@@ -596,8 +597,8 @@ def train_model(
                 prfs_eval = calculate_regression_metrics(eval_predictions, eval_targets)
                 eval_fmax = train_fmax = (float("nan"), float("nan"))
             else:
-                prfs_train = calculate_metrics(all_predictions, all_targets, threshold)
-                prfs_eval = calculate_metrics(eval_predictions, eval_targets, threshold)
+                prfs_train = calculate_metrics(all_predictions, all_targets, threshold, compute_auroc)
+                prfs_eval = calculate_metrics(eval_predictions, eval_targets, threshold, compute_auroc)
                 eval_fmax = calculate_fmax(
                     eval_predictions, eval_targets, propagate, max_proteins=fmax_max_proteins
                 )
