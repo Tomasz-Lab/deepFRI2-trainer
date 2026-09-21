@@ -26,7 +26,7 @@ class Targets:
     weights: Any                         # per-GO-term class weights
     adjacency: torch.Tensor              # direct GO adjacency, child -> parent
     task_kind: str = "classification"    # "classification" or "regression"
-    is_custom: bool = False              # False for GO -- a custom target matrix wrote task.json
+    is_gene_ontology: bool = True        # False for a custom target matrix (it wrote task.json)
 
     @property
     def num_labels(self) -> int:
@@ -51,8 +51,8 @@ def load_targets(cfg: RunConfig) -> Targets:
 
     Test and CAZy pickles are optional: a custom (non-GO) target matrix, built by
     ``custom_preprocess.py`` from a plain CSV, has train/eval labels only, so those two are left
-    ``None`` when the files are not there. Same for ``task.json``, which only a custom target
-    matrix writes -- its absence means "classification", the only kind GO ever was.
+    ``None`` when the files are not there. ``task.json`` is only written by a custom target
+    matrix too -- no file means this is a GO run, i.e. classification.
     """
     tm = cfg.target_matrix_dir
     ont = cfg.ontology
@@ -70,8 +70,8 @@ def load_targets(cfg: RunConfig) -> Targets:
 
     task_kind = "classification"
     task_file = tm / "task.json"
-    is_custom = task_file.is_file()
-    if is_custom:
+    is_gene_ontology = not task_file.is_file()
+    if not is_gene_ontology:
         task_kind = json.loads(task_file.read_text())["task_kind"]
 
     targets = Targets(
@@ -82,7 +82,7 @@ def load_targets(cfg: RunConfig) -> Targets:
         weights=_load_pickle_for_ontology(tm / "weights.pkl", ont),
         adjacency=_load_pickle_for_ontology(tm / "adjacency.pkl", ont),
         task_kind=task_kind,
-        is_custom=is_custom,
+        is_gene_ontology=is_gene_ontology,
     )
 
     if protein_vectors_cazy is not None:

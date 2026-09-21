@@ -89,16 +89,6 @@ def initialize_training(
     return optimizer, loss_fn
 
 
-def _apply_loss(loss_fn, logits, targets):
-    """``MSELoss`` needs both operands in the same dtype: under autocast ``logits`` come out of
-    the model in fp16/bf16 while ``targets`` stay float32, and ``MSELoss.backward()`` raises on
-    that mix. The other losses here tolerate it fine, so only MSE needs the cast.
-    """
-    if isinstance(loss_fn, torch.nn.MSELoss):
-        return loss_fn(logits.float(), targets.float())
-    return loss_fn(logits, targets)
-
-
 def process_batch(batch, device, use_embeddings, use_distograms):
     """Move a batch to ``device``, dropping the modalities the model does not consume."""
     _, embeds, disto, targets, masks = batch
@@ -150,7 +140,7 @@ def train_epoch(
         with torch.amp.autocast(torch.device(device).type):
             logits = model(embeds, disto, masks)
 
-        loss = _apply_loss(loss_fn, logits, targets)
+        loss = loss_fn(logits.float(), targets.float())
 
         scaler.scale(loss).backward()
         if grad_clip_max_norm is not None and grad_clip_max_norm > 0:
@@ -204,7 +194,7 @@ def evaluate_model(
             )
 
             logits = model(embeds, disto, masks)
-            loss = _apply_loss(loss_fn, logits, targets)
+            loss = loss_fn(logits.float(), targets.float())
 
             eval_predictions.append(logits.float().cpu().detach().numpy())
             eval_targets.append(targets.cpu().numpy())
@@ -255,11 +245,10 @@ def calculate_metrics(predictions, targets, threshold=0.3, compute_auroc=False):
     Vectorized numpy, ~17x faster than sklearn at this problem size (~110K proteins x 5467 GO
     terms) and numerically identical to it (asserted in tests/test_metrics.py).
 
-    ``extras`` also carries ``accuracy`` and ``macro_f1`` (the "regular" macro F1, zero for an
-    undefined class rather than skipped) -- cheap enough to always compute. ``auroc`` is only
-    added when ``compute_auroc=True``: it is plain ``sklearn.metrics.roc_auc_score`` per class,
-    which loops in Python per class and is too slow to run at GO's label count, so custom (non-GO)
-    tasks ask for it explicitly instead of it running unconditionally.
+    ``extras`` also has ``accuracy`` and ``macro_f1`` (zero for an undefined class instead of
+    skipped). ``auroc`` only shows up when ``compute_auroc=True`` -- it's sklearn, which loops
+    per class in Python and would be too slow at GO's label count, so only custom tasks ask
+    for it.
     """
     preds_bin = (sigmoid(predictions) >= threshold).astype(np.float64)
     t = targets.astype(np.float64)
@@ -290,13 +279,12 @@ def calculate_metrics(predictions, targets, threshold=0.3, compute_auroc=False):
             else np.nan
         )
 
-        # accuracy, per class then macro-averaged: (tp + tn) / N, N = tp+fp+fn+tn always.
+        # accuracy per class, then averaged: (tp + tn) / N
         n = t.shape[0]
         tn = n - tp - fp - fn
         accuracy = (tp + tn) / n
 
-        # "regular" macro F1 -- zero for an undefined class instead of skipped, i.e. what
-        # sklearn's f1_score(average="macro", zero_division=0) reports.
+        # sklearn's zero_division=0 macro F1, not the nan-skipping one above
         f1_reg_denom = 2 * tp + fp + fn
         f1_regular = np.where(f1_reg_denom > 0, 2 * tp / np.where(f1_reg_denom > 0, f1_reg_denom, 1), 0.0)
 
@@ -330,13 +318,11 @@ def calculate_metrics(predictions, targets, threshold=0.3, compute_auroc=False):
 
 def calculate_regression_metrics(predictions, targets):
     """Per-task MSE / RMSE / MAE / R2 / Pearson / Spearman, plus the mean of each -- the
-    regression counterpart of ``calculate_metrics``. Returns the same ``(a, b, c, extras)``
-    shape so a training record stays uniform regardless of task kind: ``a, b, c`` are the mean
-    MSE, mean MAE and mean R2 (unchanged, so existing consumers keep reading the right values).
+    regression counterpart of ``calculate_metrics``. Returns ``(mse, mae, r2, extras)`` so the
+    shape matches the classification tuple regardless of task kind.
 
-    R2, Pearson and Spearman are undefined for a task with zero variance in the eval split (a
-    constant target, or a constant prediction); such tasks are excluded from the mean, the same
-    way ``calculate_metrics`` skips undefined terms.
+    R2, Pearson and Spearman are undefined for a constant target or prediction; those tasks are
+    left out of the mean rather than counted as zero.
     """
     from scipy.stats import pearsonr, spearmanr  # noqa: PLC0415
 
@@ -542,12 +528,10 @@ def train_model(
         propagate: Optional DAG propagator; enables the protein-centric train/eval Fmax.
         fmax_max_proteins: Cap on proteins used for Fmax (fixed subsample, comparable across
             epochs); keeps the train-split Fmax affordable.
-        task_kind: "classification" (macro P/R/F1 + Fmax, the GO default) or "regression"
-            (MSE/MAE/R2, no Fmax -- ``eval_fmax``/``train_fmax`` stay ``(nan, nan)`` so the
-            history record keeps the same shape either way).
-        compute_auroc: Add per-class AUROC to the classification metrics -- sklearn, so only
-            for a custom (non-GO) target matrix; too slow to run unconditionally at GO's label
-            count.
+        task_kind: "classification" (macro P/R/F1 + Fmax) or "regression" (MSE/MAE/R2, no Fmax --
+            ``eval_fmax``/``train_fmax`` stay ``(nan, nan)``).
+        compute_auroc: Add per-class AUROC (sklearn) to the classification metrics. Only for
+            custom tasks -- too slow to run unconditionally at GO's label count.
 
     Returns:
         Trained model and evaluation metrics, including ``history``: one record per epoch.

@@ -35,22 +35,20 @@ Parameters
 
 Custom (non-GO) classification/regression tasks
 ------------------------------------------------
---csv PATH
-    A labels CSV (protein id column + a `label` column, see --label-columns) instead of the GO
-    graph and annotation tables. Switches to a different path entirely: --ontology/--steps are
-    ignored. Classification (0/1) vs. regression (real-valued) is detected from the label
-    column's own dtype. Requires --task and one of --structures/--dataset.
+A benchmark like PEER that ships its own train/valid/test split: one labels CSV plus one
+already-built FRIdata dataset directory per split. Switches to a different path entirely
+(--ontology/--steps are ignored), and requires all three splits.
+
 --task NAME
-    Task name for --csv; used for output directory naming and as `train.py --task NAME` later.
---structures DIR
-    A directory of MMCIF structures; embeddings/distograms are built from it via FRIdata
-    (configs/paths.yaml :: custom.fridata_src/fridata_config).
---dataset DIR
-    An already-built FRIdata dataset directory, instead of --structures.
+    Task name, used for output directory naming and as `train.py --task NAME` later.
+--train-csv, --eval-csv, --test-csv PATH
+    Labels CSV for each split.
+--train-dataset, --eval-dataset, --test-dataset DIR
+    FRIdata dataset directory for each split.
 --id-column NAME
-    Protein id column in --csv (default `protein_id`).
---embedder NAME
-    FRIdata embedder type, overriding configs/paths.yaml :: custom.embedder.
+    Protein id column in the CSVs (default `protein_id`).
+--label-columns NAME[,NAME...]
+    Label column(s); default a single column named `label`.
 
 Examples
 --------
@@ -59,8 +57,10 @@ Examples
     python preprocess.py --ontology MF --steps split
     python preprocess.py --ontology MF CC BP --set annotation_threshold=70
 
-    python preprocess.py --csv labels.csv --structures mmcifs/ --task my_task
-    python preprocess.py --csv labels.csv --dataset existing-fridata-dataset/ --task my_task
+    python preprocess.py --task gb1 \\
+        --train-csv train.csv --train-dataset fridata_train_dir \\
+        --eval-csv  valid.csv --eval-dataset  fridata_valid_dir \\
+        --test-csv  test.csv  --test-dataset  fridata_test_dir
 """
 
 from __future__ import annotations
@@ -76,7 +76,6 @@ import yaml  # noqa: E402
 
 from deepfri2_trainer.config import ONTOLOGIES  # noqa: E402
 from deepfri2_trainer.custom_preprocess import CustomPreprocessConfig  # noqa: E402
-from deepfri2_trainer.custom_preprocess import run as run_custom  # noqa: E402
 from deepfri2_trainer.custom_preprocess import run_with_predefined_splits as run_predefined  # noqa: E402
 from deepfri2_trainer.preprocess import STEPS, PreprocessConfig, run  # noqa: E402
 
@@ -140,96 +139,49 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config-dir", default=None)
     parser.add_argument("--dry-run", action="store_true")
 
-    # Custom (non-GO) classification/regression tasks: a CSV of labels instead of the GO graph
-    # + annotation tables. --ontology/--steps are ignored in this mode.
-    custom = parser.add_argument_group("custom task (CSV labels)")
-    custom.add_argument("--csv", type=Path, metavar="PATH",
-                        help="labels CSV (protein id column + one or more label columns); "
-                             "switches to the custom classification/regression path")
+    # Custom (non-GO) classification/regression task, predefined train/eval/test split (e.g.
+    # PEER): one CSV + one already-built FRIdata dataset directory per split.
+    custom = parser.add_argument_group("custom task (predefined split, e.g. PEER)")
     custom.add_argument("--task", metavar="NAME", help="task name, used for output dir naming "
                         "and later as `train.py --task NAME`")
-    structures = custom.add_mutually_exclusive_group()
-    structures.add_argument("--structures", type=Path, metavar="DIR",
-                            help="directory of MMCIF structures; builds embeddings/distograms "
-                                 "via FRIdata")
-    structures.add_argument("--dataset", type=Path, metavar="DIR",
-                            help="an already-built FRIdata dataset directory, skipping FRIdata")
     custom.add_argument("--id-column", default="protein_id", metavar="NAME",
-                        help="protein id column in --csv")
+                        help="protein id column in the labels CSVs")
     custom.add_argument("--label-columns", default=None, metavar="NAME[,NAME...]",
                         help="comma-separated label column(s); default: a single column named "
                              "'label'. Needed for a multi-task CSV, or one whose label column "
                              "is named differently")
-    custom.add_argument("--embedder", default=None, metavar="NAME",
-                        help="FRIdata embedder type, overriding configs/paths.yaml :: custom")
-
-    # A benchmark (PEER, FLIP, ...) that already ships its own train/valid/test split: one CSV
-    # + one already-built FRIdata dataset directory per split, instead of --csv/--structures and
-    # MMseqs2 clustering. All three splits are required together.
-    predefined = parser.add_argument_group("custom task, predefined split (e.g. PEER)")
     for split in ("train", "eval", "test"):
-        predefined.add_argument(f"--{split}-csv", type=Path, metavar="PATH",
-                                help=f"labels CSV for the {split} split")
-        predefined.add_argument(f"--{split}-dataset", type=Path, metavar="DIR",
-                                help=f"already-built FRIdata dataset directory for the {split} split")
+        custom.add_argument(f"--{split}-csv", type=Path, metavar="PATH",
+                            help=f"labels CSV for the {split} split")
+        custom.add_argument(f"--{split}-dataset", type=Path, metavar="DIR",
+                            help=f"already-built FRIdata dataset directory for the {split} split")
     args = parser.parse_args(argv)
     label_columns = args.label_columns.split(",") if args.label_columns else None
 
-    predefined_splits = {
+    splits = {
         split: (getattr(args, f"{split}_csv"), getattr(args, f"{split}_dataset"))
         for split in ("train", "eval", "test")
-        if getattr(args, f"{split}_csv") or getattr(args, f"{split}_dataset")
     }
-    if predefined_splits:
-        if args.csv:
-            parser.error("--csv and --train-csv/--eval-csv are mutually exclusive")
+    if any(csv_path or dataset_path for csv_path, dataset_path in splits.values()):
         if not args.task:
             parser.error("--task is required")
-        missing = {"train", "eval", "test"} - set(predefined_splits)
+        missing = [split for split, (csv_path, dataset_path) in splits.items()
+                  if not csv_path or not dataset_path]
         if missing:
-            parser.error(f"--{{train,eval,test}}-csv and --{{train,eval,test}}-dataset are all "
-                         f"required together for a predefined split; missing {sorted(missing)}")
-        for split, (csv_path, dataset_path) in predefined_splits.items():
-            if not csv_path or not dataset_path:
-                parser.error(f"--{split}-csv and --{split}-dataset must be given together")
+            parser.error(f"--train/--eval/--test-csv and -dataset are all required together; "
+                         f"missing {missing}")
         custom_cfg = CustomPreprocessConfig.from_configs(
             args.config_dir, **_parse_overrides(args.overrides))
         if args.dry_run:
             print(custom_cfg.describe())
-            for split, (csv_path, dataset_path) in predefined_splits.items():
-                print(f"{split:<19}: {csv_path} ({'ok' if csv_path.is_file() else 'MISSING'}) "
+            for split, (csv_path, dataset_path) in splits.items():
+                print(f"{split:<8}: {csv_path} ({'ok' if csv_path.is_file() else 'MISSING'}) "
                       f"+ {dataset_path} ({'ok' if dataset_path.is_dir() else 'MISSING'})")
-            print(f"{'output':<19}: {custom_cfg.task_dir(args.task)}")
+            print(f"{'output':<8}: {custom_cfg.task_dir(args.task)}")
             return 0
         run_predefined(
             custom_cfg, task=args.task, protein_id_col=args.id_column,
-            label_columns=label_columns,
-            splits={split: (csv_path, dataset_path)
-                   for split, (csv_path, dataset_path) in predefined_splits.items()},
-            command=" ".join(["python", Path(__file__).name, *(argv or sys.argv[1:])]),
-        )
-        return 0
-
-    if args.csv:
-        if not args.task:
-            parser.error("--task is required with --csv")
-        if not args.structures and not args.dataset:
-            parser.error("--csv needs one of --structures or --dataset")
-        custom_cfg = CustomPreprocessConfig.from_configs(
-            args.config_dir, **_parse_overrides(args.overrides))
-        if args.dry_run:
-            print(custom_cfg.describe())
-            print(f"{'csv':<19}: {args.csv} ({'ok' if args.csv.is_file() else 'MISSING'})")
-            structure_label = "structures" if args.structures else "dataset"
-            structure_source = args.structures or args.dataset
-            print(f"{structure_label:<19}: {structure_source} "
-                  f"({'ok' if structure_source.exists() else 'MISSING'})")
-            print(f"{'output':<19}: {custom_cfg.task_dir(args.task)}")
-            return 0
-        run_custom(
-            custom_cfg, csv_path=args.csv, task=args.task, protein_id_col=args.id_column,
-            label_columns=label_columns,
-            mmcif_dir=args.structures, dataset_dir=args.dataset, embedder=args.embedder,
+            label_columns=label_columns, splits=splits,
             command=" ".join(["python", Path(__file__).name, *(argv or sys.argv[1:])]),
         )
         return 0

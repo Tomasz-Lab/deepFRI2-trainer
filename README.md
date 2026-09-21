@@ -93,8 +93,9 @@ date and the exact command.
 
 ## Custom classification/regression tasks
 
-The same `sequence`/`structure`/`fusion` architectures also train on an arbitrary task, given a
-plain CSV instead of the GO graph and annotation tables:
+The same `sequence`/`structure`/`fusion` architectures also train on an arbitrary task, given
+plain CSV labels instead of the GO graph and annotation tables -- for a benchmark like PEER that
+already ships its own train/valid/test split and its own precomputed structures:
 
 ```csv
 protein_id,label
@@ -103,60 +104,39 @@ P67890,0
 ```
 
 ```bash
-python preprocess.py --csv labels.csv --structures /path/to/mmcifs --task my_task
-python train.py --task my_task --set-file .../my_task/overrides.yaml
+python preprocess.py --task gb1 \
+    --train-csv train.csv --train-dataset fridata_train_dir \
+    --eval-csv  valid.csv --eval-dataset  fridata_valid_dir \
+    --test-csv  test.csv  --test-dataset  fridata_test_dir \
+    --id-column id --label-columns target
+
+python train.py --task gb1 --set-file .../gb1/overrides.yaml
 ```
 
-The CSV's first column (configurable with `--id-column`) is the protein id, and by default a
-single column named `label` is the target -- pass `--label-columns` for a multi-task CSV or a
-differently-named label column. Whether the task is binary classification or regression is
-detected from the label dtype.
-`--structures` is a
-directory of MMCIF structures, turned into embeddings and distograms by
-[FRIdata](https://github.com/Tomasz-Lab/FRIdata) (`configs/paths.yaml :: custom`). An
-already-built FRIdata dataset can be passed directly with `--dataset` instead. The train/eval
-split reuses the same MMseqs2 homology-aware clustering as the GO flow.
+The id column defaults to `protein_id`; the label column defaults to `label`, or pass
+`--label-columns` for a multi-task CSV or a differently-named one. Classification vs. regression
+is detected from the label dtype (0/1 vs. real-valued), and every split has to agree.
+
+All three splits are required. A benchmark's split isn't something to recompute with MMseqs2 or
+guess at, so nothing here reshuffles train and eval back together or moves a protein between
+splits -- `train.tsv`/`eval.tsv` list exactly the ids their CSV had. Each split's dataset
+directory is an already-built FRIdata dataset; FRIdata numbers proteins per split (`train/0.cif`
+and `valid/0.cif` are different proteins), so ids get prefixed by split name and the datasets
+get merged before training touches them. That merge really copies each embedding/distogram
+under its new id rather than just rewriting the index, since `DeepFRIDataset` looks a protein up
+by id inside the HDF5 file too, not just by file path.
 
 This writes a target matrix under `configs/paths.yaml :: custom.out_dir` plus an
-`overrides.yaml` next to it, carrying the config a training run needs (dataset name, label
-kind); pass it to `train.py` with `--set-file`. Everything else (`--stages`, `--weights-*`,
-checkpoint selection, outputs) works exactly as it does for a GO run -- except there is no CAZy
-set (that benchmark is GO-specific) and, for a regression task, no sigmoid on predictions and no
-Fmax (`training.selection_metric` should be `eval_loss`, which the generated overrides set).
+`overrides.yaml` next to it (dataset name, label kind); pass it to `train.py` with
+`--set-file`. Everything else -- `--stages`, `--weights-*`, checkpoint selection, outputs --
+works exactly as for a GO run, except there's no CAZy set (that benchmark is GO-specific), and
+for regression no sigmoid on predictions and no Fmax (`selection_metric` is `eval_loss` instead,
+already set in the generated overrides).
 
-Regression is scored with MSE, RMSE, MAE, R2, Pearson and Spearman (all per task, then
-averaged); classification with the GO flow's own macro/micro precision/recall/F1 plus accuracy,
-AUROC and a "regular" macro F1 (undefined classes count as 0, not skipped) -- all logged to the
-console and wandb every epoch, computed in `utils/training.py`.
-
-### Predefined splits (PEER, FLIP, ...)
-
-A benchmark that already ships its own train/valid/test split -- one CSV plus one already-built
-FRIdata dataset directory per split -- should not be re-clustered with MMseqs2: that would
-recompute a split the benchmark's published numbers assume is fixed. `--train-csv`/
-`--train-dataset`, `--eval-csv`/`--eval-dataset` and `--test-csv`/`--test-dataset` (all three
-required together) take that split as-is instead:
-
-```bash
-python preprocess.py --task gb1 \
-    --train-csv  peer_csv/GB1/train.csv --train-dataset toolbox/data/datasets/other-part--GB1_train \
-    --eval-csv   peer_csv/GB1/valid.csv --eval-dataset  toolbox/data/datasets/other-part--GB1_valid \
-    --test-csv   peer_csv/GB1/test.csv  --test-dataset  toolbox/data/datasets/other-part--GB1_test \
-    --id-column id --label-columns target
-```
-
-Every split's CSV must agree on label columns and task kind. PEER's own numbering repeats
-across splits (`train/0.cif`, `valid/0.cif`, `test/0.cif`, ... are different proteins), so ids
-are prefixed by split name before each split's dataset directory is merged into the trainval
-dataset (train + eval) or the test dataset. That merge is a real copy, not just an index
-rewrite: `DeepFRIDataset` looks an embedding or distogram up by protein id *inside* the HDF5
-file too, not only by file path, so the prefixed id has to actually exist as a key in the
-merged file -- for both the trainval and the test dataset alike.
-
-All three splits are required, on purpose: a benchmark split is not something to guess at or
-partially honour. Train and eval are never reshuffled or merged back together to redraw the
-boundary -- `train.tsv`/`eval.tsv` list exactly the ids their originating CSV had, and test
-stays in its own, separate dataset throughout.
+Regression is scored with MSE, RMSE, MAE, R2, Pearson and Spearman; classification with the GO
+flow's own macro/micro precision/recall/F1 plus accuracy, a "regular" macro F1 (undefined
+classes count as 0, not skipped), and AUROC -- sklearn, so only for custom tasks, never for GO's
+thousands of terms.
 
 ## Architectures: owned here, checked against inference
 
