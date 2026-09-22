@@ -38,8 +38,8 @@ def write_predictions(
 ) -> Path:
     """Run inference over ``dataloader`` and write the predictions TSV.
 
-    A classification model's raw logits are squashed through a sigmoid into probabilities; a
-    regression model's outputs are the prediction already, so they are written as-is.
+    Classification logits become probabilities through a sigmoid; regression outputs are
+    already the prediction and go out as they are.
     """
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     path = prediction_path(cfg, split)
@@ -75,10 +75,9 @@ def write_all_predictions(
     targets: Targets,
     splits: tuple[str, ...] = SPLITS,
 ) -> dict[str, Path]:
-    """Write predictions for whichever of eval / test / CAZy have a loader.
+    """Write predictions for eval, test, and CAZy when the run has one.
 
-    A custom (non-GO) target matrix typically has no held-out test or CAZy set, in which case
-    ``loaders.test`` / ``loaders.cazy`` are ``None`` and those files are simply not written.
+    CAZy is GO-specific, so a custom task has no CAZy loader and no CAZy file.
     """
     loader_by_split = {"eval": loaders.eval, "test": loaders.test, "cazy": loaders.cazy}
     return {

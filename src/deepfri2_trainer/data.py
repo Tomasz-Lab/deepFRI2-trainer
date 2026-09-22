@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,13 +19,13 @@ class Targets:
     """Everything the loss and the prediction writers need about the label space."""
 
     go_indices: dict[str, int]           # GO term (or custom label) -> column index
-    protein_vectors: dict[str, Any]      # train/eval targets (sparse rows)
-    protein_vectors_test: dict[str, Any] | None
-    protein_vectors_cazy: dict[str, Any] | None
+    protein_vectors: dict[str, Any]      # trainval targets
+    protein_vectors_eval: dict[str, Any] | None   # custom task only; a GO run splits trainval
+    protein_vectors_test: dict[str, Any]
+    protein_vectors_cazy: dict[str, Any] | None   # GO only
     weights: Any                         # per-GO-term class weights
     adjacency: torch.Tensor              # direct GO adjacency, child -> parent
-    task_kind: str = "classification"    # "classification" or "regression"
-    is_gene_ontology: bool = True        # False for a custom target matrix (it wrote task.json)
+    task_kind: str | None = None         # None for a GO run; see RunConfig.task_kind
 
     @property
     def num_labels(self) -> int:
@@ -44,48 +43,36 @@ def _load_pickle_for_ontology(path: Path, ontology: str):
 
 
 def load_targets(cfg: RunConfig) -> Targets:
-    """Load the target matrix (train/eval + test + CAZy) for ``cfg.ontology``.
+    """Load the target matrix for ``cfg.ontology``.
 
     ``adjacency_prop.pkl`` (the transitive closure) is not loaded: ``MCLossDAG`` works on the
     direct edges in ``adjacency.pkl``.
 
-    Test and CAZy pickles are optional: a custom (non-GO) target matrix, built by
-    ``custom_preprocess.py`` from a plain CSV, has train/eval labels only, so those two are left
-    ``None`` when the files are not there. ``task.json`` is only written by a custom target
-    matrix too -- no file means this is a GO run, i.e. classification.
+    Two of the pickles are optional and tell the flows apart: a GO run has the CAZy set but no
+    separate eval one (it splits trainval), a custom task the other way round.
     """
     tm = cfg.target_matrix_dir
     ont = cfg.ontology
 
-    protein_vectors_test = None
-    if (tm / "protein_vectors_test.pkl").is_file():
-        protein_vectors_test = _load_pickle_for_ontology(tm / "protein_vectors_test.pkl", ont)
-
-    protein_vectors_cazy = None
     cazy_go_indices_path = cfg.cazy_target_matrix_dir / "go_indices.pkl"
-    if cazy_go_indices_path.is_file():
-        protein_vectors_cazy = _load_pickle_for_ontology(
-            cfg.cazy_target_matrix_dir / "protein_vectors.pkl", ont
-        )
-
-    task_kind = "classification"
-    task_file = tm / "task.json"
-    is_gene_ontology = not task_file.is_file()
-    if not is_gene_ontology:
-        task_kind = json.loads(task_file.read_text())["task_kind"]
-
     targets = Targets(
         go_indices=_load_pickle_for_ontology(tm / "go_indices.pkl", ont),
         protein_vectors=_load_pickle_for_ontology(tm / "protein_vectors.pkl", ont),
-        protein_vectors_test=protein_vectors_test,
-        protein_vectors_cazy=protein_vectors_cazy,
+        protein_vectors_eval=(
+            _load_pickle_for_ontology(tm / "protein_vectors_eval.pkl", ont)
+            if (tm / "protein_vectors_eval.pkl").is_file() else None
+        ),
+        protein_vectors_test=_load_pickle_for_ontology(tm / "protein_vectors_test.pkl", ont),
+        protein_vectors_cazy=(
+            _load_pickle_for_ontology(cfg.cazy_target_matrix_dir / "protein_vectors.pkl", ont)
+            if cazy_go_indices_path.is_file() else None
+        ),
         weights=_load_pickle_for_ontology(tm / "weights.pkl", ont),
         adjacency=_load_pickle_for_ontology(tm / "adjacency.pkl", ont),
-        task_kind=task_kind,
-        is_gene_ontology=is_gene_ontology,
+        task_kind=cfg.task_kind,
     )
 
-    if protein_vectors_cazy is not None:
+    if targets.protein_vectors_cazy is not None:
         # The CAZy target matrix is built independently; its label space must match.
         go_indices_cazy = _load_pickle_for_ontology(cazy_go_indices_path, ont)
         assert go_indices_cazy == targets.go_indices, (
@@ -102,21 +89,21 @@ class Loaders:
 
     train: DataLoader          # honours cfg.train_on ("train" or "train+eval")
     eval: DataLoader
-    test: DataLoader | None    # None for a custom target matrix with no held-out test set
-    cazy: DataLoader | None    # None for a custom target matrix (CAZy is a GO-only benchmark)
+    test: DataLoader
+    cazy: DataLoader | None    # None for a custom task (CAZy is a GO-only benchmark)
     emb_size: int
 
 
 def build_loaders(cfg: RunConfig, targets: Targets) -> Loaders:
     """Build the train / eval / test / CAZy dataloaders.
 
-    ``unfix_type`` restores the protein-id spelling used by the embedding and distogram
-    indices: AFDB ids in the train/eval set, ``<id>_A`` in the GO test and CAZy sets. A custom
-    target matrix's dataset was built to whatever convention it was built with, so both
-    train/eval and test are configurable (``data.trainval_unfix_type`` / ``testset_unfix_type``,
-    defaulting to the GO flow's own conventions); CAZy is GO-only and never present for a
-    custom target matrix. Test and CAZy are simply absent (``targets.protein_vectors_test`` /
-    ``_cazy`` are ``None``) when there is no such set.
+    A GO run splits one trainval dataset by the MMseqs2 assignment in ``cfg.split_dir``. A
+    custom task comes with an eval dataset of its own, so it is loaded like the test set and
+    the MMseqs2 split is never touched.
+
+    ``unfix_type`` restores the id spelling the embedding and distogram indices use -- AFDB
+    ids in the GO trainval set, ``<id>_A`` in the test and CAZy ones. A custom task overrides
+    it per split via ``data.<split>_unfix_type``.
     """
     dataset_kwargs = dict(
         use_embeddings=cfg.use_embeddings,
@@ -124,73 +111,57 @@ def build_loaders(cfg: RunConfig, targets: Targets) -> Loaders:
         MAX_SEQ_LEN=int(cfg.data["max_seq_len"]),
         sigma_dist=int(cfg.data["sigma_dist"]),
     )
-    batch_size = int(cfg.data["batch_size"])
-    num_workers = int(cfg.data["num_workers"])
-    seed = cfg.seed
-
-    # `DeepFRIDataset.__init__` prints "Number of proteins: N"; the label goes on the same
-    # line so the three datasets are distinguishable without touching the class.
-    print("train/eval set: ", end="")
-    emb_config = get_data_config(cfg.trainval_dataset_name, cfg.datasets_dir)
-    dataset = DeepFRIDataset(
-        emb_config["data_path"],
-        protein_vectors=targets.protein_vectors,
-        emb_size=emb_config["emb_size"],
-        unfix_type=cfg.data.get("trainval_unfix_type", "AFDB_v4"),  # AF-<id>-F1-model_v4_A
-        **dataset_kwargs,
-    )
-    train_dataloader, eval_dataloader = create_data_loaders(
-        dataset, cfg.split_dir, batch_size=batch_size, num_workers=num_workers, seed=seed
+    loader_kwargs = dict(
+        batch_size=int(cfg.data["batch_size"]),
+        num_workers=int(cfg.data["num_workers"]),
+        seed=cfg.seed,
     )
 
-    test_dataloader = None
-    if targets.protein_vectors_test is not None:
-        print("test set:       ", end="")
-        emb_config_test = get_data_config(cfg.testset_name, cfg.datasets_dir)
-        dataset_test = DeepFRIDataset(
-            emb_config_test["data_path"],
-            protein_vectors=targets.protein_vectors_test,
-            emb_size=emb_config_test["emb_size"],
-            unfix_type=cfg.data.get("testset_unfix_type", "chain"),  # <id>_A
+    def dataset(split: str, protein_vectors, default_unfix: str | None) -> DeepFRIDataset:
+        # DeepFRIDataset prints "Number of proteins: N"; this puts a label on the same line.
+        print(f"{split:<9}: ", end="")
+        config = get_data_config(cfg.dataset_for(split), cfg.datasets_dir)
+        return DeepFRIDataset(
+            config["data_path"],
+            protein_vectors=protein_vectors,
+            emb_size=config["emb_size"],
+            unfix_type=cfg.data.get(f"{split}_unfix_type", default_unfix),
             **dataset_kwargs,
-        )
-        test_dataloader = create_test_loader(
-            dataset_test, batch_size=batch_size, num_workers=num_workers, seed=seed
         )
 
-    cazy_dataloader = None
-    if targets.protein_vectors_cazy is not None:
-        print("cazy set:       ", end="")
-        emb_config_cazy = get_data_config(cfg.cazyset_name, cfg.datasets_dir)
-        dataset_cazy = DeepFRIDataset(
-            emb_config_cazy["data_path"],
-            protein_vectors=targets.protein_vectors_cazy,
-            emb_size=emb_config_cazy["emb_size"],
-            unfix_type="chain",
-            **dataset_kwargs,
+    trainval = dataset("trainval", targets.protein_vectors, "AFDB_v4")  # AF-<id>-F1-model_v4_A
+    if targets.protein_vectors_eval is None:
+        train_loader, eval_loader = create_data_loaders(trainval, cfg.split_dir, **loader_kwargs)
+    else:
+        train_loader = create_test_loader(trainval, **loader_kwargs)
+        eval_loader = create_test_loader(
+            dataset("evalset", targets.protein_vectors_eval, None), shuffle=False, **loader_kwargs
         )
-        cazy_dataloader = create_test_loader(
-            dataset_cazy, batch_size=batch_size, num_workers=num_workers, seed=seed
-        )
+
+    test_loader = create_test_loader(
+        dataset("testset", targets.protein_vectors_test, "chain"), **loader_kwargs  # <id>_A
+    )
+    cazy_loader = None if targets.protein_vectors_cazy is None else create_test_loader(
+        dataset("cazyset", targets.protein_vectors_cazy, "chain"), **loader_kwargs
+    )
 
     # production variant: train on train+eval
-    train_loader = train_dataloader
     if cfg.train_on == "train+eval":
         train_loader = DataLoader(
-            ConcatDataset([train_dataloader.dataset, eval_dataloader.dataset]),
-            batch_size=batch_size,
+            ConcatDataset([train_loader.dataset, eval_loader.dataset]),
+            batch_size=loader_kwargs["batch_size"],
             shuffle=True,
-            num_workers=num_workers,
+            num_workers=loader_kwargs["num_workers"],
             pin_memory=True,
-            collate_fn=train_dataloader.collate_fn,
-            generator=train_dataloader.generator,
-            worker_init_fn=train_dataloader.worker_init_fn,
+            collate_fn=train_loader.collate_fn,
+            generator=train_loader.generator,
+            worker_init_fn=train_loader.worker_init_fn,
         )
 
     return Loaders(
         train=train_loader,
-        eval=eval_dataloader,
-        test=test_dataloader,
-        cazy=cazy_dataloader,
-        emb_size=emb_config["emb_size"],
+        eval=eval_loader,
+        test=test_loader,
+        cazy=cazy_loader,
+        emb_size=trainval.emb_size,
     )

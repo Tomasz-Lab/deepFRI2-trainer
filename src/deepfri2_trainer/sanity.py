@@ -179,10 +179,6 @@ def check_fusion_branches(
     A branch whose sub-model has no prediction file next to its weights -- i.e. a checkpoint
     not produced by this trainer -- is reported as skipped instead of failing.
     """
-    if loaders.test is None:
-        print("fusion branch check SKIPPED: this target matrix has no held-out test set")
-        return
-
     device = next(model.parameters()).device
     refs = cfg.weights
 
@@ -224,8 +220,7 @@ def check_fusion_branches(
 def check_prediction_file(path: str | Path, targets: Targets, expected_proteins: int | None = None):
     """Re-read a written predictions TSV and check its shape and value range.
 
-    The [0, 1] range only holds for a classification model's sigmoid probabilities; a
-    regression model's raw predictions are unbounded, so that check is skipped for it.
+    Only sigmoid probabilities are bounded, so the range check is classification-only.
     """
     table = pd.read_csv(path, delimiter="\t", header=None, names=["protein", "go_term", "score"])
     n_proteins = table["protein"].nunique()

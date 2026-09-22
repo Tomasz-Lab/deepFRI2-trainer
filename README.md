@@ -41,10 +41,11 @@ parameter; the `train.py` docstring documents them in full.
 `validate.ipynb` scores trained runs with the protein-centric **CAFA evaluation** and draws
 the paper's figures and tables — see [CAFA evaluation](#cafa-evaluation) below.
 
+To train on something other than GO — your own classification or regression labels — see
+[Training on your own dataset](#training-on-your-own-dataset).
+
 Not yet wired in: CAFA scores appended to `training.log` at the end of a run (they are computed
-in the notebook for now), and **retraining / fine-tuning** beyond loading initial weights —
-swapping the GO-term head for a regression/classification task, and restricting to a GO-term
-subset.
+in the notebook for now), and restricting a GO run to a subset of terms.
 
 ## Preprocessing
 
@@ -91,52 +92,52 @@ new model.
 Every run appends its whole console output to `data/data.log`, under a header giving the
 date and the exact command.
 
-## Custom classification/regression tasks
+## Training on your own dataset
 
-The same `sequence`/`structure`/`fusion` architectures also train on an arbitrary task, given
-plain CSV labels instead of the GO graph and annotation tables -- for a benchmark like PEER that
-already ships its own train/valid/test split and its own precomputed structures:
+Anything the model can be trained on comes down to structures and labels. Starting from mmCIF
+files and a CSV, there are three steps.
+
+**1. Structures -> a FRIdata dataset, one per split.** Run
+[FRIdata](https://github.com/Tomasz-Lab/FRIdata) over each split's mmCIF directory. That gives
+you a directory with `dataset.json`, `embeddings.idx` / `.h5` (ESM-2) and `distograms.idx` /
+`.h5` — the same thing the GO flow trains on, and the only format this trainer reads.
+
+**2. Labels -> a target matrix.** One CSV per split, keyed by protein id:
 
 ```csv
 protein_id,label
-P12345,1
-P67890,0
+P12345,1.7
 ```
 
 ```bash
 python preprocess.py --task gb1 \
-    --train-csv train.csv --train-dataset fridata_train_dir \
-    --eval-csv  valid.csv --eval-dataset  fridata_valid_dir \
-    --test-csv  test.csv  --test-dataset  fridata_test_dir \
-    --id-column id --label-columns target
-
-python train.py --task gb1 --set-file .../gb1/overrides.yaml
+    --train-csv train.csv --train-dataset fridata/train \
+    --eval-csv  valid.csv --eval-dataset  fridata/valid \
+    --test-csv  test.csv  --test-dataset  fridata/test
 ```
 
-The id column defaults to `protein_id`; the label column defaults to `label`, or pass
-`--label-columns` for a multi-task CSV or a differently-named one. Classification vs. regression
-is detected from the label dtype (0/1 vs. real-valued), and every split has to agree.
+Real-valued labels mean regression, 0/1 labels mean classification, and the splits have to
+agree. The id column defaults to `protein_id` and the label column to `label`; for several
+labels (multi-task) or a different name, pass `--label-columns target1,target2`. Ids in the
+CSV must match the ones in the dataset — if the dataset spells them `<id>_A`, add
+`--set data.trainval_unfix_type=chain` to the training command below.
 
-All three splits are required. A benchmark's split isn't something to recompute with MMseqs2 or
-guess at, so nothing here reshuffles train and eval back together or moves a protein between
-splits -- `train.tsv`/`eval.tsv` list exactly the ids their CSV had. Each split's dataset
-directory is an already-built FRIdata dataset; FRIdata numbers proteins per split (`train/0.cif`
-and `valid/0.cif` are different proteins), so ids get prefixed by split name and the datasets
-get merged before training touches them. That merge really copies each embedding/distogram
-under its new id rather than just rewriting the index, since `DeepFRIDataset` looks a protein up
-by id inside the HDF5 file too, not just by file path.
+**3. Train.**
 
-This writes a target matrix under `configs/paths.yaml :: custom.out_dir` plus an
-`overrides.yaml` next to it (dataset name, label kind); pass it to `train.py` with
-`--set-file`. Everything else -- `--stages`, `--weights-*`, checkpoint selection, outputs --
-works exactly as for a GO run, except there's no CAZy set (that benchmark is GO-specific), and
-for regression no sigmoid on predictions and no Fmax (`selection_metric` is `eval_loss` instead,
-already set in the generated overrides).
+```bash
+python train.py --task gb1                  # all three stages
+python train.py --task gb1 --stages fusion  # just the fusion gate
+```
 
-Regression is scored with MSE, RMSE, MAE, R2, Pearson and Spearman; classification with the GO
-flow's own macro/micro precision/recall/F1 plus accuracy, a "regular" macro F1 (undefined
-classes count as 0, not skipped), and AUROC -- sklearn, so only for custom tasks, never for GO's
-thousands of terms.
+Everything a GO run supports works here too — `--stages`, `--weights-*`, `--train-on`,
+checkpoint selection, the sanity checks, the run directory and its outputs. Step 2 writes the
+target matrix and an `overrides.yaml` under `custom_tasks_dir` (see `configs/paths.yaml`), and
+`--task` picks that file up; `--set` still overrides it.
+
+What differs from a GO run follows from the labels: no CAZy set (a GO-specific benchmark),
+classification also reports AUROC, and regression reports MSE / RMSE / MAE / R2 / Pearson /
+Spearman, writes predictions without a sigmoid, and selects checkpoints on `eval_loss` since
+Fmax is a classification metric.
 
 ## Architectures: owned here, checked against inference
 
@@ -586,7 +587,7 @@ src/deepfri2_trainer/
     outputs.py                wandb session, run dir, artifacts, log.txt, training.log
     import_released.py        import released deepFRI2 checkpoints into runs_dir
     preprocess.py             target matrix / split / CAZy target construction
-    custom_preprocess.py      target matrix from a CSV (custom classification/regression tasks)
+    custom_preprocess.py      target matrix from CSV labels (custom classification/regression)
     sanity.py                 sanity & validation checks
     utils/                    dataloader, training loop, losses
         target_matrix.py      protein -> GO-term supervision from the annotation tables

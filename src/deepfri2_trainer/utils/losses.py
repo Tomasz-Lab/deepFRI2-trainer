@@ -4,7 +4,7 @@
 - ``MCLossDAG``         -- max constraint loss (MCLoss) over the direct GO edges; sequence and
   fusion models.
 
-A custom regression target matrix uses plain ``torch.nn.MSELoss`` instead.
+Both are GO-specific; a custom task uses one of ``training.PLAIN_LOSSES`` instead.
 """
 
 import numpy as np

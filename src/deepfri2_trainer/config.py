@@ -181,17 +181,24 @@ class RunConfig:
     def dataset_name(self) -> str:
         return self.data["dataset_name"].format(data_version=self.data_version)
 
-    @property
-    def trainval_dataset_name(self) -> str:
-        return self.dataset_name + self.data["trainval_suffix"]
+    def dataset_for(self, split: str) -> str:
+        """The FRIdata dataset a split loads from: ``trainval``, ``evalset``, ``testset`` or
+        ``cazyset``.
+
+        Normally ``dataset_name`` plus the split's suffix. A custom task's datasets have no
+        common naming scheme, so it names each one outright in ``data.<split>_dataset``.
+        ``evalset`` only exists there -- a GO run splits ``trainval`` instead.
+        """
+        return self.data.get(f"{split}_dataset") or self.dataset_name + self.data[f"{split}_suffix"]
 
     @property
-    def testset_name(self) -> str:
-        return self.dataset_name + self.data["testset_suffix"]
+    def task_kind(self) -> str | None:
+        """Either "classification" or "regression" for a custom task, None for a GO run.
 
-    @property
-    def cazyset_name(self) -> str:
-        return self.dataset_name + self.data["cazyset_suffix"]
+        Written by `preprocess.py --task`; picks the loss, the metrics and whether predictions
+        go through a sigmoid.
+        """
+        return self.data.get("task_kind")
 
     @property
     def params(self) -> str:
@@ -300,7 +307,8 @@ class RunConfig:
     def describe(self) -> str:
         lines = [
             f"model type          : {self.model_type}",
-            f"ontology            : {self.ontology}",
+            f"ontology            : {self.ontology}"
+            + (f"  ({self.task_kind} task)" if self.task_kind else ""),
             f"train on            : {self.train_on}",
             f"dataset             : {self.dataset_name}",
             f"target matrix params: {self.params}",
@@ -348,8 +356,8 @@ def load_config(
     """Load and merge the YAML configs for one training run."""
     if model_type not in MODEL_TYPES:
         raise ValueError(f"model_type must be one of {MODEL_TYPES}, got {model_type!r}")
-    # A GO namespace (MF/CC/BP) or a custom task name -- both are just a namespacing string for
-    # run directories and `weights.<ontology>` config blocks, so any non-empty one is accepted.
+    # MF/CC/BP or a custom task name: either way it only namespaces run directories and
+    # `weights.<ontology>` blocks, so anything non-empty will do.
     if not ontology:
         raise ValueError(f"ontology must be a non-empty string, got {ontology!r}")
     if train_on not in TRAIN_ON:
@@ -375,7 +383,7 @@ def load_config(
     raw["model"] = raw[f"{model_type}_model"]
 
     project_location = str(raw["project_location"])
-    for key in ("deepfri2_src", "runs_dir"):
+    for key in ("deepfri2_src", "runs_dir", "custom_tasks_dir"):
         if isinstance(raw.get(key), str):
             raw[key] = raw[key].format(project_location=project_location)
 

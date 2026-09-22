@@ -19,7 +19,7 @@ Or one stage at a time, with the intermediate objects in hand::
     model, metrics = run_training(cfg, model, loaders, targets)
 """
 
-from . import import_released, model, outputs, parity, preprocess, sanity
+from . import custom_preprocess, import_released, model, outputs, parity, preprocess, sanity
 from .config import MODEL_TYPES, ONTOLOGIES, TRAIN_ON, RunConfig, load_config
 from .data import Loaders, Targets, build_loaders, load_targets
 from .load_model import (
@@ -71,6 +71,7 @@ __all__ = [
     "build_structure_model",
     "check_parity",
     "correlate",
+    "custom_preprocess",
     "load_config",
     "load_targets",
     "model",

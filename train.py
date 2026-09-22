@@ -17,12 +17,9 @@ Parameters
 --ontology {MF,CC,BP}
     Required, except with --task or --import-released.
 --task NAME
-    Alternative to --ontology: a custom (non-GO) task name, for a target matrix built by
-    `preprocess.py --csv ...`. Detects classification vs. regression from the label dtype the
-    CSV was built with; everything else below applies the same way.
---set-file PATH
-    A YAML file of config overrides, merged before --set -- e.g. the `overrides.yaml` a
-    `preprocess.py --csv ...` run writes (dataset name, empty test/CAZy suffixes).
+    A custom task built by `preprocess.py --task NAME`, instead of --ontology. Its
+    `overrides.yaml` is merged in automatically, with --set still winning; everything else
+    below works the same.
 --stages {sequence,structure,fusion} [...]
     Which models to train; default all three, always in sequence -> structure -> fusion order.
     Training `fusion` alone takes its frozen sub-models from `weights.<ontology>` in
@@ -98,6 +95,7 @@ Examples
     python train.py --ontology MF
     python train.py --ontology BP --train-on train+eval
     python train.py --ontology CC --stages fusion
+    python train.py --task gb1
     python train.py --ontology MF --max-steps-per-epoch 2 --set training.num_epochs=1 --no-wandb
 """
 
@@ -119,6 +117,8 @@ from deepfri2_trainer import (  # noqa: E402
     import_released_runs,
     run_stages,
 )
+from deepfri2_trainer.config import _deep_merge, _read_yaml  # noqa: E402
+from deepfri2_trainer.custom_preprocess import task_dir  # noqa: E402
 
 
 def _parse_overrides(assignments: list[str]) -> dict:
@@ -137,18 +137,6 @@ def _parse_overrides(assignments: list[str]) -> dict:
     return overrides
 
 
-def _merge_overrides(base: dict, on_top: dict) -> dict:
-    """Deep-merge two override dicts, ``on_top`` winning -- used to layer ``--set`` over
-    ``--set-file`` (e.g. the ``overrides.yaml`` a custom preprocessing run produces)."""
-    merged = dict(base)
-    for key, value in on_top.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _merge_overrides(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
@@ -161,8 +149,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Gene Ontology namespace to train (required unless --task or --import-released)")
     namespace_group.add_argument(
         "--task", metavar="NAME",
-        help="custom (non-GO) task name, for a target matrix built by "
-             "`preprocess.py --csv ...` -- an alternative to --ontology")
+        help="custom task built by `preprocess.py --task NAME`, instead of --ontology; its "
+             "overrides.yaml is merged in automatically")
     parser.add_argument("--stages", nargs="+", choices=STAGE_ORDER, default=list(STAGE_ORDER),
                         help="models to train (always run in sequence, structure, fusion order)")
     parser.add_argument("--train-on", choices=TRAIN_ON, default="train",
@@ -177,9 +165,6 @@ def build_parser() -> argparse.ArgumentParser:
                         dest="overrides",
                         help="config overrides; repeatable, e.g. --set training.num_epochs=5 "
                              "--set data.batch_size=16")
-    parser.add_argument("--set-file", default=None, metavar="PATH",
-                        help="YAML file of config overrides, merged before --set (e.g. the "
-                             "overrides.yaml a `preprocess.py --csv ...` run writes)")
     parser.add_argument("--weights-sequence", default=None, metavar="NAME",
                         help="sequence checkpoint: frozen sub-model (fusion run) or fine-tuning "
                              "starting point (sequence run)")
@@ -202,8 +187,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     overrides = _parse_overrides(args.overrides)
-    if args.set_file:
-        overrides = _merge_overrides(yaml.safe_load(Path(args.set_file).read_text()), overrides)
+    if args.task:
+        # What preprocess.py recorded about this task; --set still wins over it.
+        recorded = task_dir(args.task, args.config_dir) / "overrides.yaml"
+        if not recorded.is_file():
+            parser.error(f"no custom task {args.task!r}: {recorded} does not exist. Build it "
+                         "first with `python preprocess.py --task ... --train-csv ...`.")
+        overrides = _deep_merge(_read_yaml(recorded), overrides)
     if overrides:
         print(f"config overrides: {overrides}")
 

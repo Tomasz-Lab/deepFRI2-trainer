@@ -333,7 +333,7 @@ def run_stage(
             eval_loss=f"{selected['eval_loss']:.4f}",
             eval_fmax=f"{selected['eval_fmax']:.4f}",
             train_fmax=f"{selected['train_fmax']:.4f}",
-            # eval_metrics[2] is F1 for classification, R2 for regression -- label it right.
+            # eval_metrics[2] is F1 for classification and R2 for regression.
             **{("eval_r2" if targets.task_kind == "regression" else "eval_f1"):
                f"{selected['eval_metrics'][2]:.4f}"},
             time=format_duration(metrics["stage_seconds"]),
