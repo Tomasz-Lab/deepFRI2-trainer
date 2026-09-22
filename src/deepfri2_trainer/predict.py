@@ -10,12 +10,11 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
 
 from .config import RunConfig
 from .data import Loaders, Targets
-from .utils.training import process_batch
+from .utils.training import output_scores, process_batch
 
 SPLIT_PREFIX = {"eval": "predictions", "test": "predictions_test", "cazy": "predictions_cazy"}
 SPLITS = tuple(SPLIT_PREFIX)
@@ -38,8 +37,8 @@ def write_predictions(
 ) -> Path:
     """Run inference over ``dataloader`` and write the predictions TSV.
 
-    Classification logits become probabilities through a sigmoid; regression outputs are
-    already the prediction and go out as they are.
+    Scores are probabilities (sigmoid, or softmax for multi-class) or, for regression, the
+    predicted values themselves.
     """
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     path = prediction_path(cfg, split)
@@ -54,8 +53,7 @@ def write_predictions(
             embed, dist, _target, mask = process_batch(
                 batch, device=device, use_embeddings=cfg.use_embeddings, use_distograms=cfg.use_distograms
             )
-            raw = model(embed, dist, mask).detach().cpu().numpy()
-            preds = raw if targets.task_kind == "regression" else sigmoid(raw)
+            preds = output_scores(model(embed, dist, mask).detach().cpu().numpy(), targets.task_kind)
             for prot_id, pred in zip(batch[0], preds):
                 for go_id, value in zip(go_terms, pred):
                     rows.append((prot_id, go_id, value))

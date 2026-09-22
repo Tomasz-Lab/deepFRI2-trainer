@@ -4,7 +4,8 @@
 - ``MCLossDAG``         -- max constraint loss (MCLoss) over the direct GO edges; sequence and
   fusion models.
 
-Both are GO-specific; a custom task uses one of ``training.PLAIN_LOSSES`` instead.
+Both are GO-specific. A custom task uses BCE or MSE through ``MissingLabelLoss``, or
+``CrossEntropy`` for multi-class labels.
 """
 
 import numpy as np
@@ -242,3 +243,33 @@ class MCLossDAG(nn.Module):
 # Renamed to match the source paper. The old name is kept so archived run configs 
 # (`loss.name: MCMLossDAG`) still resolve to the same class.
 MCMLossDAG = MCLossDAG
+
+
+class MissingLabelLoss(nn.Module):
+    """An elementwise loss averaged over the labels that are actually there.
+
+    A multi-task CSV rarely labels every protein for every task; the gaps arrive as NaN and are
+    left out instead of turning the whole loss into NaN.
+    """
+
+    def __init__(self, loss: nn.Module):
+        super().__init__()
+        self.loss = loss  # built with reduction="none"
+
+    def forward(self, logits, targets):
+        # autocast leaves the logits in half precision; the GO losses cast for themselves.
+        logits, targets = logits.float(), targets.float()
+        present = ~torch.isnan(targets)
+        losses = self.loss(logits, targets.nan_to_num())
+        return losses[present].sum() / present.sum().clamp(min=1)
+
+
+class CrossEntropy(nn.CrossEntropyLoss):
+    """Softmax cross-entropy against one-hot targets, optionally class-weighted.
+
+    The one-hot rows go in as class indices: with probability targets PyTorch divides a
+    weighted loss by the batch size rather than by the weights, which isn't a weighted mean.
+    """
+
+    def forward(self, logits, targets):
+        return super().forward(logits.float(), targets.argmax(dim=1))

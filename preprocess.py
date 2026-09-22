@@ -41,6 +41,10 @@ not apply here.
 
 --task NAME
     Task name; names the output directory and is what `train.py --task NAME` reads back.
+--task-type {classification,multi-task-classification,regression,multi-task-regression}
+    Required. Classification takes one column of integer class ids (softmax over the
+    classes); multi-task classification takes two or more 0/1 columns (a sigmoid each).
+    Regression takes one column, multi-task regression two or more.
 --train-csv, --eval-csv, --test-csv PATH
     Labels CSV for each split.
 --train-dataset, --eval-dataset, --test-dataset DIR
@@ -48,7 +52,7 @@ not apply here.
 --id-column NAME
     Protein id column in the CSVs (default `protein_id`).
 --label-columns NAME[,NAME...]
-    Label column(s), default `label`. Real-valued labels mean regression, 0/1 classification.
+    Label column(s), default `label`. Empty cells are missing labels.
 
 Examples
 --------
@@ -57,7 +61,7 @@ Examples
     python preprocess.py --ontology MF --steps split
     python preprocess.py --ontology MF CC BP --set annotation_threshold=70
 
-    python preprocess.py --task gb1 \\
+    python preprocess.py --task gb1 --task-type regression \\
         --train-csv train.csv --train-dataset fridata/train \\
         --eval-csv  valid.csv --eval-dataset  fridata/valid \\
         --test-csv  test.csv  --test-dataset  fridata/test
@@ -142,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
     custom = parser.add_argument_group("custom task (labels from a CSV, split taken as given)")
     custom.add_argument("--task", metavar="NAME", help="task name, used for output dir naming "
                         "and later as `train.py --task NAME`")
+    custom.add_argument("--task-type", choices=list(custom_preprocess.TASK_TYPES),
+                        help="what the labels are; required for a custom task")
     custom.add_argument("--id-column", default="protein_id", metavar="NAME",
                         help="protein id column in the labels CSVs")
     custom.add_argument("--label-columns", default=None, metavar="NAME[,NAME...]",
@@ -160,9 +166,9 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.task or any(path for paths in splits.values() for path in paths):
         incomplete = [split for split, paths in splits.items() if not all(paths)]
-        if not args.task or incomplete:
-            parser.error("a custom task needs --task plus --<split>-csv and --<split>-dataset "
-                         f"for every split; incomplete: {incomplete or ['(none)']}")
+        if not args.task or not args.task_type or incomplete:
+            parser.error("a custom task needs --task, --task-type, and --<split>-csv and "
+                         f"--<split>-dataset for every split; incomplete: {incomplete or ['(none)']}")
         if args.overrides:
             # --set tunes the GO preprocessing config, which this path never reads.
             parser.error("--set does not apply to a custom task; pass it to train.py instead")
@@ -174,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{'output':<8}: {out_dir}")
             return 0
         custom_preprocess.run(
-            task=args.task, splits=splits, id_column=args.id_column,
+            task=args.task, task_type=args.task_type, splits=splits, id_column=args.id_column,
             label_columns=args.label_columns.split(",") if args.label_columns else None,
             config_dir=args.config_dir,
             command=" ".join(["python", Path(__file__).name, *(argv or sys.argv[1:])]),

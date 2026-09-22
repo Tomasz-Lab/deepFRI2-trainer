@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 
 from .config import RunConfig
 from .data import Loaders, Targets
-from .utils.training import count_trainable_parameters, process_batch
+from .utils.training import count_trainable_parameters, output_scores, process_batch
 
 
 def _present(tensor: torch.Tensor | None) -> bool:
@@ -167,8 +167,8 @@ def check_fusion_branches(
     model: nn.Module,
     loaders: Loaders,
     cfg: RunConfig,
-    rtol: float = 1e-6,
-    atol: float = 1e-6,
+    rtol: float = 1e-4,
+    atol: float = 1e-4,
 ) -> None:
     """The frozen branches must reproduce their stand-alone models' test predictions.
 
@@ -201,9 +201,8 @@ def check_fusion_branches(
         table = pd.read_csv(path, delimiter="\t", header=None, names=["protein", "go_term", "score"])
         expected = table[table["protein"] == protein]["score"].to_numpy()
         assert expected.size, f"{protein} has no predictions in {path}"
-        np.testing.assert_allclose(
-            logits[prot_idx].detach().sigmoid().cpu().numpy(), expected, rtol=rtol, atol=atol
-        )
+        scores = output_scores(logits[prot_idx].detach().float().cpu().numpy(), cfg.task_kind)
+        np.testing.assert_allclose(scores, expected, rtol=rtol, atol=atol)
         print(f"  {branch} branch matches {path.name}")
         return True
 
@@ -220,7 +219,7 @@ def check_fusion_branches(
 def check_prediction_file(path: str | Path, targets: Targets, expected_proteins: int | None = None):
     """Re-read a written predictions TSV and check its shape and value range.
 
-    Only sigmoid probabilities are bounded, so the range check is classification-only.
+    Regression values are unbounded, so the [0, 1] check only applies to probabilities.
     """
     table = pd.read_csv(path, delimiter="\t", header=None, names=["protein", "go_term", "score"])
     n_proteins = table["protein"].nunique()

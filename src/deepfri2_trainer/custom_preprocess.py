@@ -1,5 +1,7 @@
-"""Target matrix for a custom task -- classification or regression, one label or many, read
-from a CSV instead of the GO annotation tables.
+"""Target matrix for a custom task, read from a CSV instead of the GO annotation tables.
+
+The task type is given, never guessed from the labels -- see ``TASK_TYPES``. Empty cells are
+missing labels and are left out of the loss and the metrics.
 
 Each of train / eval / test brings its own labels CSV and its own FRIdata dataset, and the
 split is used exactly as it came: nothing is reclustered, merged or renamed here. What comes
@@ -19,8 +21,15 @@ import yaml
 from .config import CONFIG_DIR, _read_yaml
 from .preprocess import Transcript, rule
 
-#: split -> (its `data.<key>_*` config keys, its pickle). `train` goes first: it fixes the
-#: label space and the task kind that the other two have to match.
+#: --task-type -> how the trainer treats it (`data.task_kind`)
+TASK_TYPES = {
+    "classification": "multiclass",               # one column of class ids -> softmax
+    "multi-task-classification": "multilabel",    # several 0/1 columns -> a sigmoid each
+    "regression": "regression",
+    "multi-task-regression": "regression",
+}
+
+#: split -> (its `data.<key>_*` config keys, its pickle)
 SPLITS = {
     "train": ("trainval", "protein_vectors.pkl"),
     "eval": ("evalset", "protein_vectors_eval.pkl"),
@@ -38,26 +47,75 @@ def _task_dir(paths: dict, task: str) -> Path:
     return Path(root) / task
 
 
-def read_labels(csv_path: Path | str, id_column: str = "protein_id",
+def read_labels(csv_paths: dict[str, Path], task_type: str, id_column: str = "protein_id",
                 label_columns: list[str] | None = None):
-    """``(label columns, {protein id: label vector}, "classification" | "regression")``.
+    """Read every split's labels and check they fit ``task_type``.
 
-    Vectors are dense, unlike the GO flow's sparse ones -- a custom task has a handful of
-    labels, not thousands, and ``.to_dense()`` in the dataset is a no-op on a dense tensor.
+    Returns ``(go_indices, {split: {protein id: target vector}}, weights)``. Vectors are dense
+    -- a custom task has a handful of labels, not GO's thousands -- and hold NaN where a label
+    is missing. For classification they are one-hot over the classes of all three splits (so a
+    class seen only in test still gets an output), and a protein without a class is dropped.
+
+    ``weights`` follows scikit-learn's ``class_weight="balanced"``, counted on train: class
+    weights for classification, BCE's ``pos_weight`` for multi-task classification, and ones
+    for regression.
 
     A CSV often carries columns that aren't labels (PEER's also has ``sequence``), so the
     default is the single column ``label`` rather than "everything but the id".
     """
-    frame = pd.read_csv(csv_path)
+    task_kind = TASK_TYPES[task_type]
     label_columns = list(label_columns) if label_columns else ["label"]
-    missing = [c for c in (id_column, *label_columns) if c not in frame.columns]
-    if missing:
-        raise ValueError(f"{csv_path} has no column(s) {missing}; it has {list(frame.columns)}")
+    multi_task = task_type.startswith("multi-task")
+    if multi_task != (len(label_columns) > 1):
+        raise ValueError(
+            f"{task_type} needs {'two or more label columns' if multi_task else 'one label column'}"
+            f", got {label_columns}")
 
-    values = frame[label_columns].to_numpy(dtype=np.float32)
-    vectors = {str(pid): torch.from_numpy(row) for pid, row in zip(frame[id_column], values)}
-    kind = "classification" if np.isin(values, (0.0, 1.0)).all() else "regression"
-    return label_columns, vectors, kind
+    ids, values = {}, {}
+    for split, csv_path in csv_paths.items():
+        frame = pd.read_csv(csv_path)
+        missing = [c for c in (id_column, *label_columns) if c not in frame.columns]
+        if missing:
+            raise ValueError(f"{csv_path} has no column(s) {missing}; it has {list(frame.columns)}")
+        ids[split] = frame[id_column].astype(str).to_numpy()
+        values[split] = frame[label_columns].to_numpy(dtype=np.float32)
+
+    present = np.concatenate([v[~np.isnan(v)] for v in values.values()])
+    if task_kind == "multilabel" and not np.isin(present, (0, 1)).all():
+        raise ValueError("multi-task classification labels must be 0, 1 or empty")
+    if task_kind == "multiclass" and not (present == np.round(present)).all():
+        raise ValueError("classification labels must be integer class ids")
+
+    if task_kind == "multiclass":
+        classes = np.unique(present)
+        go_indices = {str(int(c)): i for i, c in enumerate(classes)}
+        for split, v in values.items():
+            labelled = ~np.isnan(v[:, 0])
+            ids[split] = ids[split][labelled]
+            values[split] = np.eye(len(classes), dtype=np.float32)[
+                np.searchsorted(classes, v[labelled, 0])]
+    else:
+        go_indices = {name: i for i, name in enumerate(label_columns)}
+
+    weights = np.ones(len(go_indices), dtype=np.float32)
+    if task_kind == "multiclass":
+        # n / (K * n_c) over the K classes train has; one it never sees keeps weight 1.
+        counts = values["train"].sum(axis=0)
+        seen = counts > 0
+        weights[seen] = counts.sum() / (seen.sum() * counts[seen])
+    elif task_kind == "multilabel":
+        # sklearn's class_weight="balanced" weighs positives against negatives as n_neg / n_pos,
+        # which is exactly what pos_weight scales. Counted on train, over labels that are there.
+        train = values["train"]
+        positives = np.nansum(train, axis=0)
+        negatives = (~np.isnan(train)).sum(axis=0) - positives
+        weights = np.where(positives > 0, negatives / np.maximum(positives, 1), 1.0).astype(np.float32)
+
+    vectors = {
+        split: {pid: torch.from_numpy(row) for pid, row in zip(ids[split], values[split])}
+        for split in values
+    }
+    return go_indices, vectors, weights
 
 
 def _dump(path: Path, task: str, payload) -> None:
@@ -78,9 +136,11 @@ def _overrides(task: str, task_kind: str, splits: dict, target_matrix_dir: Path)
         data[f"{key}_dataset"] = str(Path(splits[split][1]).resolve())
         data[f"{key}_unfix_type"] = None
 
-    training: dict = {"loss": {"name": "MSE" if task_kind == "regression" else "BCE"}}
-    if task_kind == "regression":
-        training["selection_metric"] = "eval_loss"  # Fmax only means something for classification
+    training = {
+        "loss": {"name": {"multiclass": "CE", "multilabel": "BCE", "regression": "MSE"}[task_kind]},
+        "use_class_weights": task_kind != "regression",
+        "selection_metric": "eval_loss",
+    }
     return {
         "data": data,
         "training": training,
@@ -90,6 +150,7 @@ def _overrides(task: str, task_kind: str, splits: dict, target_matrix_dir: Path)
 
 def run(
     task: str,
+    task_type: str,
     splits: dict[str, tuple[Path, Path]],
     id_column: str = "protein_id",
     label_columns: list[str] | None = None,
@@ -114,24 +175,18 @@ def run(
         rule(f"custom task ({task})")
         target_matrix_dir.mkdir(parents=True, exist_ok=True)
 
-        columns = task_kind = None
-        for split, (key, pickle_name) in SPLITS.items():
-            csv_path, dataset_dir = splits[split]
-            split_columns, vectors, split_kind = read_labels(csv_path, id_column, label_columns)
-            if columns is None:
-                columns, task_kind = split_columns, split_kind
-            elif (split_columns, split_kind) != (columns, task_kind):
-                raise ValueError(
-                    f"'{split}' labels {split_columns} ({split_kind}) differ from 'train' "
-                    f"{columns} ({task_kind}) -- every split must label the same task"
-                )
-            _dump(target_matrix_dir / pickle_name, task, vectors)
-            print(f"{split:<6}: {len(vectors)} proteins from {csv_path}, structures {dataset_dir}")
+        task_kind = TASK_TYPES[task_type]
+        go_indices, vectors, weights = read_labels(
+            {split: csv_path for split, (csv_path, _) in splits.items()}, task_type, id_column,
+            label_columns)
+        for split, (_, pickle_name) in SPLITS.items():
+            _dump(target_matrix_dir / pickle_name, task, vectors[split])
+            print(f"{split:<6}: {len(vectors[split])} proteins from {splits[split][0]}, "
+                  f"structures {splits[split][1]}")
 
-        go_indices = {name: index for index, name in enumerate(columns)}
         _dump(target_matrix_dir / "go_indices.pkl", task, go_indices)
-        # Neither is used by MSE or BCE, but load_targets and DAGPropagator expect the files.
-        _dump(target_matrix_dir / "weights.pkl", task, np.ones(len(go_indices), dtype=np.float32))
+        _dump(target_matrix_dir / "weights.pkl", task, weights)
+        # No label hierarchy, but load_targets and DAGPropagator expect the file.
         _dump(target_matrix_dir / "adjacency.pkl", task,
               torch.zeros((len(go_indices), len(go_indices))))
 
@@ -140,7 +195,9 @@ def run(
             _overrides(task, task_kind, splits, target_matrix_dir), sort_keys=False))
 
         rule("summary")
-        print(f"{task_kind}, {len(go_indices)} label(s): {', '.join(columns)}")
+        print(f"{task_type}, {len(go_indices)} output(s): {', '.join(go_indices)}")
+        if task_kind != "regression":
+            print("class weights: " + ", ".join(f"{w:.2f}" for w in weights))
         print(f"wrote {out_dir}")
         print(f"train with: python train.py --task {task}")
 

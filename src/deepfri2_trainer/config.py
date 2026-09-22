@@ -193,10 +193,9 @@ class RunConfig:
 
     @property
     def task_kind(self) -> str | None:
-        """Either "classification" or "regression" for a custom task, None for a GO run.
+        """A custom task's kind -- multiclass, multilabel or regression -- or None for GO.
 
-        Written by `preprocess.py --task`; picks the loss, the metrics and whether predictions
-        go through a sigmoid.
+        Written by `preprocess.py --task`; picks the metrics and how logits become predictions.
         """
         return self.data.get("task_kind")
 

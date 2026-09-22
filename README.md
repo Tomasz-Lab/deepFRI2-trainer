@@ -110,17 +110,32 @@ P12345,1.7
 ```
 
 ```bash
-python preprocess.py --task gb1 \
+python preprocess.py --task gb1 --task-type regression \
     --train-csv train.csv --train-dataset fridata/train \
     --eval-csv  valid.csv --eval-dataset  fridata/valid \
     --test-csv  test.csv  --test-dataset  fridata/test
 ```
 
-Real-valued labels mean regression, 0/1 labels mean classification, and the splits have to
-agree. The id column defaults to `protein_id` and the label column to `label`; for several
-labels (multi-task) or a different name, pass `--label-columns target1,target2`. Ids in the
-CSV must match the ones in the dataset — if the dataset spells them `<id>_A`, add
-`--set data.trainval_unfix_type=chain` to the training command below.
+`--task-type` is required and says what the labels are:
+
+| `--task-type` | Label columns | Model output | Loss |
+|---|---|---|---|
+| `classification` | one, integer class ids | softmax over the classes | cross-entropy, class weights n / (K · n_class) |
+| `multi-task-classification` | two or more, 0/1 | a sigmoid per label | BCE, `pos_weight` = n_neg / n_pos per label |
+| `regression` | one, real values | one value | MSE |
+| `multi-task-regression` | two or more, real values | a value per label | MSE |
+
+A binary task is `classification` with classes 0 and 1. Both kinds of weight are
+scikit-learn's `class_weight="balanced"`, counted on train.
+
+Empty cells are missing labels; they count toward neither the loss nor the metrics, so a
+multi-task CSV doesn't need every protein labelled for every task. The id column defaults to
+`protein_id` and the label column to `label`; name others with `--label-columns y1,y2`.
+
+Ids in the CSV must match the ones in the dataset. Proteins found in only one of the two are
+skipped, so check the `Number of proteins` lines at the start of training — and if the dataset
+spells ids `<id>_A`, add `--set data.trainval_unfix_type=chain` (and likewise `evalset_`,
+`testset_`) to the training command.
 
 **3. Train.**
 
@@ -129,15 +144,17 @@ python train.py --task gb1                  # all three stages
 python train.py --task gb1 --stages fusion  # just the fusion gate
 ```
 
-Everything a GO run supports works here too — `--stages`, `--weights-*`, `--train-on`,
-checkpoint selection, the sanity checks, the run directory and its outputs. Step 2 writes the
-target matrix and an `overrides.yaml` under `custom_tasks_dir` (see `configs/paths.yaml`), and
-`--task` picks that file up; `--set` still overrides it.
+Everything a GO run supports works here too — `--stages`, `--weights-*`, `--train-on`, the
+sanity checks, the run directory and its outputs. Step 2 writes the target matrix and an
+`overrides.yaml` under `custom_tasks_dir` (see `configs/paths.yaml`), and `--task` picks it up;
+`--set` still wins over it, e.g. `--set training.use_class_weights=false` to train without
+class weights.
 
-What differs from a GO run follows from the labels: no CAZy set (a GO-specific benchmark),
-classification also reports AUROC, and regression reports MSE / RMSE / MAE / R2 / Pearson /
-Spearman, writes predictions without a sigmoid, and selects checkpoints on `eval_loss` since
-Fmax is a classification metric.
+What differs from a GO run: the best epoch is picked on eval loss, there's no Fmax and no CAZy
+set (both GO-specific), and the metrics follow the task — accuracy / balanced accuracy /
+macro F1 for classification, P/R/F1 and AUROC for multi-task classification, MSE / RMSE / MAE /
+R2 / Pearson / Spearman for regression. Predictions are softmax or sigmoid probabilities, or
+the predicted values for regression.
 
 ## Architectures: owned here, checked against inference
 
