@@ -258,7 +258,7 @@ def create_data_loaders(dataset, split_dir: Path | str, batch_size=32, num_worke
     return train_dataloader, eval_dataloader
 
 
-def create_test_loader(dataset, batch_size=32, num_workers=4, seed=None, shuffle=True):
+def create_test_loader(dataset, batch_size=32, num_workers=4, seed=None, shuffle=False):
     """Build a loader over the whole dataset."""
     test_dataloader = torch.utils.data.DataLoader(
         dataset,

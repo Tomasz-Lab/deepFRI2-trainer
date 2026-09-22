@@ -53,8 +53,9 @@ def read_labels(csv_paths: dict[str, Path], task_type: str, id_column: str = "pr
 
     Returns ``(go_indices, {split: {protein id: target vector}}, weights)``. Vectors are dense
     -- a custom task has a handful of labels, not GO's thousands -- and hold NaN where a label
-    is missing. For classification they are one-hot over the classes of all three splits (so a
-    class seen only in test still gets an output), and a protein without a class is dropped.
+    is missing; a protein with no labels at all is dropped. For classification they are
+    one-hot over the classes of all three splits, so a class seen only in test still gets an
+    output.
 
     ``weights`` follows scikit-learn's ``class_weight="balanced"``, counted on train: class
     weights for classification, BCE's ``pos_weight`` for multi-task classification, and ones
@@ -77,8 +78,10 @@ def read_labels(csv_paths: dict[str, Path], task_type: str, id_column: str = "pr
         missing = [c for c in (id_column, *label_columns) if c not in frame.columns]
         if missing:
             raise ValueError(f"{csv_path} has no column(s) {missing}; it has {list(frame.columns)}")
-        ids[split] = frame[id_column].astype(str).to_numpy()
-        values[split] = frame[label_columns].to_numpy(dtype=np.float32)
+        labels = frame[label_columns].to_numpy(dtype=np.float32)
+        labelled = ~np.isnan(labels).all(axis=1)
+        ids[split] = frame[id_column].astype(str).to_numpy()[labelled]
+        values[split] = labels[labelled]
 
     present = np.concatenate([v[~np.isnan(v)] for v in values.values()])
     if task_kind == "multilabel" and not np.isin(present, (0, 1)).all():
@@ -90,10 +93,7 @@ def read_labels(csv_paths: dict[str, Path], task_type: str, id_column: str = "pr
         classes = np.unique(present)
         go_indices = {str(int(c)): i for i, c in enumerate(classes)}
         for split, v in values.items():
-            labelled = ~np.isnan(v[:, 0])
-            ids[split] = ids[split][labelled]
-            values[split] = np.eye(len(classes), dtype=np.float32)[
-                np.searchsorted(classes, v[labelled, 0])]
+            values[split] = np.eye(len(classes), dtype=np.float32)[np.searchsorted(classes, v[:, 0])]
     else:
         go_indices = {name: i for i, name in enumerate(label_columns)}
 

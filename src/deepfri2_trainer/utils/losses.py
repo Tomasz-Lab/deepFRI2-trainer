@@ -4,8 +4,7 @@
 - ``MCLossDAG``         -- max constraint loss (MCLoss) over the direct GO edges; sequence and
   fusion models.
 
-Both are GO-specific. A custom task uses BCE or MSE through ``MissingLabelLoss``, or
-``CrossEntropy`` for multi-class labels.
+Both are GO-specific; a custom task uses ``masked_bce``, ``cross_entropy`` or ``masked_mse``.
 """
 
 import numpy as np
@@ -245,31 +244,28 @@ class MCLossDAG(nn.Module):
 MCMLossDAG = MCLossDAG
 
 
-class MissingLabelLoss(nn.Module):
-    """An elementwise loss averaged over the labels that are actually there.
-
-    A multi-task CSV rarely labels every protein for every task; the gaps arrive as NaN and are
-    left out instead of turning the whole loss into NaN.
-    """
-
-    def __init__(self, loss: nn.Module):
-        super().__init__()
-        self.loss = loss  # built with reduction="none"
-
-    def forward(self, logits, targets):
-        # autocast leaves the logits in half precision; the GO losses cast for themselves.
-        logits, targets = logits.float(), targets.float()
-        present = ~torch.isnan(targets)
-        losses = self.loss(logits, targets.nan_to_num())
-        return losses[present].sum() / present.sum().clamp(min=1)
+# Losses for a custom task. The logits are cast because autocast leaves them in half
+# precision; the GO losses cast for themselves. NaN in a target marks a missing label.
 
 
-class CrossEntropy(nn.CrossEntropyLoss):
+def masked_bce(logits, targets, weights=None):
+    """BCE over the labels that are there; ``weights`` is the per-label pos_weight."""
+    present = ~targets.isnan()
+    pos_weight = None if weights is None else weights.expand_as(targets)[present]
+    return F.binary_cross_entropy_with_logits(
+        logits.float()[present], targets[present], pos_weight=pos_weight)
+
+
+def masked_mse(logits, targets):
+    """MSE over the labels that are there."""
+    present = ~targets.isnan()
+    return F.mse_loss(logits.float()[present], targets[present])
+
+
+def cross_entropy(logits, targets, weights=None):
     """Softmax cross-entropy against one-hot targets, optionally class-weighted.
 
-    The one-hot rows go in as class indices: with probability targets PyTorch divides a
-    weighted loss by the batch size rather than by the weights, which isn't a weighted mean.
+    The targets go in as class indices: with one-hot targets PyTorch divides a weighted loss by
+    the batch size rather than by the weights, which isn't a weighted mean.
     """
-
-    def forward(self, logits, targets):
-        return super().forward(logits.float(), targets.argmax(dim=1))
+    return F.cross_entropy(logits.float(), targets.argmax(dim=1), weight=weights)

@@ -10,22 +10,23 @@ import os
 import random
 import time
 
+from functools import partial
+
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
 import tqdm
 import wandb
 from scipy.special import expit as sigmoid
 from scipy.special import softmax
 
-from .losses import CrossEntropy, MCLossDAG, MissingLabelLoss, WeightedFocalLoss
+from .losses import MCLossDAG, WeightedFocalLoss, cross_entropy, masked_bce, masked_mse
 
 # `MCMLossDAG` is the pre-rename spelling, still present in archived run configs.
 MCLOSS_NAMES = ("MCLossDAG", "MCMLossDAG")
 
-#: Losses for a custom task: binary / multi-label, multi-class, regression.
-PLAIN_LOSSES = ("BCE", "CE", "MSE")
+#: Losses for a custom task: multi-task classification, classification, regression.
+PLAIN_LOSSES = {"BCE": masked_bce, "CE": cross_entropy, "MSE": masked_mse}
 
 #: What the first three numbers of each metric function are called, per task kind.
 METRIC_NAMES = {
@@ -88,18 +89,11 @@ def initialize_training(
             raw_violation_weight=loss_fn_kwargs.get("raw_violation_weight", 0.0),
             raw_violation_margin=loss_fn_kwargs.get("raw_violation_margin", 0.0),
         )
-    elif loss_fn_name in ("BCE", "CE"):
-        # `weights` holds what preprocessing computed -- pos_weight for BCE, class weights for
-        # CE -- or is None when class weights are switched off.
-        if weights is not None:
-            weights = torch.as_tensor(weights, dtype=torch.float32,
-                                      device=next(model.parameters()).device)
-        loss_fn = (
-            MissingLabelLoss(nn.BCEWithLogitsLoss(reduction="none", pos_weight=weights))
-            if loss_fn_name == "BCE" else CrossEntropy(weight=weights)
-        )
-    elif loss_fn_name == "MSE":
-        loss_fn = MissingLabelLoss(nn.MSELoss(reduction="none"))
+    elif loss_fn_name in PLAIN_LOSSES:
+        loss_fn = PLAIN_LOSSES[loss_fn_name]
+        if weights is not None and loss_fn_name != "MSE":  # pos_weight / class weights
+            device = next(model.parameters()).device
+            loss_fn = partial(loss_fn, weights=torch.as_tensor(weights, device=device))
     elif loss_fn_name is None:
         loss_fn = WeightedFocalLoss(alpha=weights)
     else:

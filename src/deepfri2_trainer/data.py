@@ -133,9 +133,9 @@ def build_loaders(cfg: RunConfig, targets: Targets) -> Loaders:
     if targets.protein_vectors_eval is None:
         train_loader, eval_loader = create_data_loaders(trainval, cfg.split_dir, **loader_kwargs)
     else:
-        train_loader = create_test_loader(trainval, **loader_kwargs)
+        train_loader = create_test_loader(trainval, shuffle=True, **loader_kwargs)
         eval_loader = create_test_loader(
-            dataset("evalset", targets.protein_vectors_eval, None), shuffle=False, **loader_kwargs
+            dataset("evalset", targets.protein_vectors_eval, None), **loader_kwargs
         )
 
     test_loader = create_test_loader(
