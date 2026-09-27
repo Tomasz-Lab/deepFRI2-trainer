@@ -14,7 +14,8 @@ match, so :func:`save` takes a *directory*, never a name -- a figure cannot be f
 another figure's label. ``weighted`` is an argument everywhere and is part of both.
 
 :data:`PALETTE` and :data:`SPLIT_LABELS` are empty here and set from the notebook, next to the
-method names they belong to.
+method names they belong to. deepFRI2's own models are coloured by sub-model instead
+(:data:`MODEL_COLORS`).
 """
 
 from __future__ import annotations
@@ -29,9 +30,26 @@ import pandas as pd
 from .evaluator import ONTOLOGIES, SPLITS, summarize
 
 #: Fixed colour per method, so a method looks the same in every figure. Set from the notebook.
-#: Methods not listed are assigned blues (deepFRI2 variants, keeping them together) or tab10.
+#: Methods not listed get a colour from :data:`MODEL_COLORS` if their label names a deepFRI2
+#: sub-model, and tab10 otherwise.
 PALETTE: dict[str, str] = {}
-DEEPFRI2_COLORS = ("#1f77b4", "#17becf", "#08306b", "#6baed6")
+
+#: One hue per deepFRI2 sub-model, so a plot of the usual three is read by colour alone. The
+#: first entry is used for a single model of that type; further models of the same type walk
+#: down the ramp, which keeps an arbitrary number of them legible and still grouped by hue.
+MODEL_COLORS = {
+    "sequence": ("#00D9FF", "#5EE7FF", "#00B2D1"),   # light blue
+    "structure": ("#0070D1", "#5CABFF", "#004FA3"),  # blue
+    "fusion": ("#FF0000", "#FF5C5C", "#D10000"),     # red
+}
+
+#: Words in a method label that identify its sub-model. Checked in this order, so a fusion model
+#: whose label also names its inputs ("ESM+kernel fusion") still reads as fusion.
+MODEL_KEYWORDS = {
+    "fusion": ("fusion",),
+    "structure": ("structure", "struct", "kernel"),
+    "sequence": ("sequence", "seq", "esm"),
+}
 
 #: Display name per split, e.g. ``{"test": "Test set"}``. Set from the notebook.
 SPLIT_LABELS: dict[str, str] = {}
@@ -114,17 +132,29 @@ def method_order(frame: pd.DataFrame, methods: Sequence[str] | None = None) -> l
     return [m for m in methods if m in present] if methods else list(dict.fromkeys(frame["method"]))
 
 
+def model_type_of(method: str) -> str | None:
+    """Which deepFRI2 sub-model a label names, or ``None`` if it names none of them."""
+    lowered = method.lower()
+    for model_type, keywords in MODEL_KEYWORDS.items():
+        if any(keyword in lowered for keyword in keywords):
+            return model_type
+    return None
+
+
 def method_colors(methods: Iterable[str], colors: dict[str, str] | None = None) -> dict[str, str]:
-    """Colour per method: explicit override, then :data:`PALETTE`, then blues / tab10."""
-    resolved, deepfri2, other = {}, 0, 0
+    """Colour per method: explicit override, then :data:`PALETTE`, then the sub-model hue, then tab10."""
+    resolved, other = {}, 0
+    used = dict.fromkeys(MODEL_COLORS, 0)
     for method in methods:
+        model_type = model_type_of(method)
         if colors and method in colors:
             resolved[method] = colors[method]
         elif method in PALETTE:
             resolved[method] = PALETTE[method]
-        elif method.lower().startswith("deepfri2"):
-            resolved[method] = DEEPFRI2_COLORS[deepfri2 % len(DEEPFRI2_COLORS)]
-            deepfri2 += 1
+        elif model_type is not None:
+            ramp = MODEL_COLORS[model_type]
+            resolved[method] = ramp[used[model_type] % len(ramp)]
+            used[model_type] += 1
         else:
             resolved[method] = plt.cm.tab10(other % 10)
             other += 1

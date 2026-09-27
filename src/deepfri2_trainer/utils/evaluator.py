@@ -50,8 +50,10 @@ class EvalPaths:
 
     ``layout`` maps names to templates relative to ``project_location``; ``{data_version}``,
     ``{go_version}``, ``{dataset_name}``, ``{params}``, ``{ontology}`` and ``{threshold}`` are
-    substituted. The keys used below are ``obo``, ``ia``, ``target_matrix``, ``split``,
-    ``cazy_target_matrix``, ``struct_test_ids``, ``predictions`` and ``competitors``.
+    substituted. It comes from the ``layout:`` block of ``configs/paths.yaml`` -- the same block
+    ``RunConfig`` resolves training paths from, so the two cannot drift. The keys used below are
+    ``obo``, ``ia``, ``target_matrix``, ``split``, ``cazy_target_matrix``, ``struct_test_ids``,
+    ``predictions`` and ``competitors``.
     """
 
     layout: dict[str, str]
@@ -65,10 +67,22 @@ class EvalPaths:
     runs_dir: Path | None = None
 
     @classmethod
-    def from_configs(cls, layout: dict[str, str], config_dir: Path | str | None = None, **overrides):
-        """Dataset versions and roots from ``configs/paths.yaml`` + ``configs/data.yaml``."""
+    def from_configs(cls, layout: dict[str, str] | None = None, config_dir: Path | str | None = None,
+                     **overrides):
+        """Everything from ``configs/paths.yaml`` + ``configs/data.yaml``: layout, roots, versions.
+
+        ``layout`` defaults to the ``layout:`` block of ``paths.yaml``, which is the single place
+        the data tree is written down. Pass one explicitly only to score against a tree that is
+        not this checkout's.
+        """
         config_dir = Path(config_dir) if config_dir is not None else CONFIG_DIR
         paths = yaml.safe_load((config_dir / "paths.yaml").read_text()) or {}
+        if layout is None:
+            layout = paths.get("layout")
+            if not layout:
+                raise KeyError(
+                    f"{config_dir / 'paths.yaml'} has no `layout:` block; it is where every data "
+                    "path lives. Restore it, or pass `layout=` explicitly.")
         data = (yaml.safe_load((config_dir / "data.yaml").read_text()) or {})["data"]
 
         location = os.getenv("PROJECT_LOCATION") or paths["project_location"]
@@ -95,6 +109,10 @@ class EvalPaths:
         return self.dataset_name + {"eval": "", "test": self.testset_suffix, "cazy": self.cazyset_suffix}[split]
 
     def path(self, key: str, ontology: str = "MF") -> Path:
+        if key not in self.layout:
+            raise KeyError(
+                f"no `{key}` entry in the `layout:` block of configs/paths.yaml; "
+                f"it holds {sorted(self.layout)}")
         return self.project_location / self.layout[key].format(
             data_version=self.data_version,
             go_version=self.go_version,
