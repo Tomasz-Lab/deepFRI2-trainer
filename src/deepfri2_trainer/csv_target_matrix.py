@@ -1,16 +1,32 @@
-"""Target matrix for a custom task, read from a CSV instead of the GO annotation tables.
+"""``preprocess.py --task``: the target matrix from labels CSVs instead of the GO tables.
 
-The task type is given, never guessed from the labels -- see ``TASK_TYPES``. Empty cells are
-missing labels and are left out of the loss and the metrics.
+The counterpart of :mod:`.utils.target_matrix`, which builds the target matrix from GO
+annotations. Given one labels CSV and one FRIdata dataset per split (train / eval / test), it:
 
-Each of train / eval / test brings its own labels CSV and its own FRIdata dataset, and the
-split is used exactly as it came: nothing is reclustered, merged or renamed here. What comes
-out is a target matrix plus an ``overrides.yaml`` telling ``train.py`` where everything is.
+1. reads the id column and the label column(s) of each CSV, and checks they fit the task type
+   (one column or several; 0/1 for multi-task classification, integers for classification);
+2. drops proteins with every label empty, and keeps partly empty ones with NaN in the gaps --
+   the loss and the metrics skip NaN;
+3. turns each protein's labels into a dense vector: one-hot over the classes of all three
+   splits for classification, the raw values otherwise. ``go_indices`` maps each output to
+   its column -- class ids for classification, column names otherwise;
+4. computes ``weights`` on train: scikit-learn's balanced class weights for classification,
+   BCE ``pos_weight`` (n_neg / n_pos) for multi-task classification, ones for regression;
+5. writes ``protein_vectors{,_eval,_test}.pkl``, ``go_indices.pkl``, ``weights.pkl`` and an
+   all-zero ``adjacency.pkl`` (there is no label hierarchy, but the loader expects the file),
+   each keyed by the task name where the GO ones are keyed by ontology;
+6. writes ``overrides.yaml``, which ``train.py --task`` merges over ``configs/``: each split's
+   dataset directory, the task kind, the loss (CE / BCE / MSE), class weights on or off,
+   model selection on eval loss, and where the target matrix is.
+
+What it does not do, because the GO flow's reasons for it do not apply: no MMseqs2 split
+(the dataset's own split is used as given), no CAZy set, no CAFA ground truth, no
+``adjacency_prop``, no test FASTA. Config, logging to ``data.log`` and pickle writing are
+:mod:`.preprocess`'s.
 """
 
 from __future__ import annotations
 
-import pickle
 from pathlib import Path
 
 import numpy as np
@@ -18,8 +34,7 @@ import pandas as pd
 import torch
 import yaml
 
-from .config import CONFIG_DIR, _read_yaml
-from .preprocess import Transcript, rule
+from .preprocess import PreprocessConfig, Transcript, _save, rule
 
 #: --task-type -> how the trainer treats it (`data.task_kind`)
 TASK_TYPES = {
@@ -39,12 +54,7 @@ SPLITS = {
 
 def task_dir(task: str, config_dir: Path | str | None = None) -> Path:
     """Where ``preprocess.py --task NAME`` writes and ``train.py --task NAME`` reads back."""
-    return _task_dir(_read_yaml(Path(config_dir or CONFIG_DIR) / "paths.yaml"), task)
-
-
-def _task_dir(paths: dict, task: str) -> Path:
-    root = paths["custom_tasks_dir"].format(project_location=paths["project_location"])
-    return Path(root) / task
+    return PreprocessConfig.from_configs(config_dir).task_dir(task)
 
 
 def read_labels(csv_paths: dict[str, Path], task_type: str, id_column: str = "protein_id",
@@ -118,12 +128,6 @@ def read_labels(csv_paths: dict[str, Path], task_type: str, id_column: str = "pr
     return go_indices, vectors, weights
 
 
-def _dump(path: Path, task: str, payload) -> None:
-    """Target-matrix pickles are keyed by ontology; a custom task uses its own name."""
-    with open(path, "wb") as handle:
-        pickle.dump({task: payload}, handle)
-
-
 def _overrides(task: str, task_kind: str, splits: dict, target_matrix_dir: Path) -> dict:
     """The config `train.py --task NAME` merges over configs/ to train this task.
 
@@ -166,29 +170,30 @@ def run(
     if set(splits) != set(SPLITS):
         raise ValueError(f"splits needs exactly {sorted(SPLITS)}, got {sorted(splits)}")
 
-    paths = _read_yaml(Path(config_dir or CONFIG_DIR) / "paths.yaml")
-    out_dir = _task_dir(paths, task)
+    cfg = PreprocessConfig.from_configs(config_dir)
+    out_dir = cfg.task_dir(task)
     target_matrix_dir = out_dir / "target_matrix"
-    log_file = paths["preprocess"]["log_file"].format(project_location=paths["project_location"])
 
-    with Transcript(Path(log_file), command or f"preprocess.py --task {task}"):
+    # Target-matrix pickles are keyed by ontology; a custom task uses its own name instead.
+    def save(name: str, payload) -> None:
+        _save(target_matrix_dir, name, {task: payload})
+
+    with Transcript(cfg.log_file, command or f"preprocess.py --task {task}"):
         rule(f"custom task ({task})")
-        target_matrix_dir.mkdir(parents=True, exist_ok=True)
 
         task_kind = TASK_TYPES[task_type]
         go_indices, vectors, weights = read_labels(
             {split: csv_path for split, (csv_path, _) in splits.items()}, task_type, id_column,
             label_columns)
         for split, (_, pickle_name) in SPLITS.items():
-            _dump(target_matrix_dir / pickle_name, task, vectors[split])
+            save(pickle_name, vectors[split])
             print(f"{split:<6}: {len(vectors[split])} proteins from {splits[split][0]}, "
                   f"structures {splits[split][1]}")
 
-        _dump(target_matrix_dir / "go_indices.pkl", task, go_indices)
-        _dump(target_matrix_dir / "weights.pkl", task, weights)
+        save("go_indices.pkl", go_indices)
+        save("weights.pkl", weights)
         # No label hierarchy, but load_targets and DAGPropagator expect the file.
-        _dump(target_matrix_dir / "adjacency.pkl", task,
-              torch.zeros((len(go_indices), len(go_indices))))
+        save("adjacency.pkl", torch.zeros((len(go_indices), len(go_indices))))
 
         overrides_path = out_dir / "overrides.yaml"
         overrides_path.write_text(yaml.safe_dump(

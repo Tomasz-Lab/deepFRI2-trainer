@@ -52,8 +52,25 @@ in the notebook for now), and restricting a GO run to a subset of terms.
 
 ## Preprocessing
 
-[`preprocess.py`](preprocess.py) turns the primitive inputs into the supervision `train.py`
-consumes. Three steps, each runnable alone:
+[`preprocess.py`](preprocess.py) turns labels into the **target matrix** `train.py` consumes:
+`go_indices` (the model's outputs), `protein_vectors*` (the label of every protein), `weights`
+and `adjacency`. It is one script with two sources of labels, and the source is the only thing
+that differs:
+
+| | GO (default) | Your own labels (`--task NAME`) |
+|---|---|---|
+| Labels come from | the GO annotation tables + GO graph | one CSV per split |
+| Train/eval split | computed here (MMseqs2), or adopted | taken as given: one FRIdata dataset per split |
+| Steps | `targets`, `split`, `cazy` | one: read the CSVs |
+| Code | [`preprocess.py`](src/deepfri2_trainer/preprocess.py) | [`csv_target_matrix.py`](src/deepfri2_trainer/csv_target_matrix.py) — reads the CSVs, writes the same pickles, plus an `overrides.yaml` for `train.py`; config, logging and pickle writing are shared |
+| Output | `<out_dir>/<dataset>/<params>/target_matrix/` | `<custom_tasks_dir>/NAME/target_matrix/` + `overrides.yaml` |
+| Train with | `train.py --ontology MF` | `train.py --task NAME` |
+
+The pickles have the same names and shape either way, so everything from `train.py` on reads
+them the same way. The rest of this section is the GO flow; for your own labels see
+[Training on your own dataset](#training-on-your-own-dataset).
+
+The GO flow has three steps, each runnable alone:
 
 | Step | Produces | Cost |
 |---|---|---|
@@ -105,7 +122,10 @@ files and a CSV, there are three steps.
 you a directory with `dataset.json`, `embeddings.idx` / `.h5` (ESM-2) and `distograms.idx` /
 `.h5` — the same thing the GO flow trains on, and the only format this trainer reads.
 
-**2. Labels -> a target matrix.** One CSV per split, keyed by protein id:
+**2. Labels -> a target matrix.** The same `preprocess.py` as for GO, with `--task`: instead of
+the `targets` / `split` / `cazy` steps it reads one CSV per split, keyed by protein id, and
+keeps the split you give it (see [Preprocessing](#preprocessing) for how the two compare).
+`--ontology`, `--steps` and `--set` do not apply here.
 
 ```csv
 protein_id,label
@@ -135,6 +155,14 @@ Empty cells are missing labels; they count toward neither the loss nor the metri
 multi-task CSV doesn't need every protein labelled for every task. The id column defaults to
 `protein_id` and the label column to `label`; name others with `--label-columns y1,y2`.
 
+What it writes, under `<custom_tasks_dir>/<task>/`: `target_matrix/` with the GO flow's pickles
+— `protein_vectors{,_eval,_test}.pkl` (a dense vector per protein; one-hot for classification),
+`go_indices.pkl` (class ids or column names -> output index), `weights.pkl` (as in the table)
+and an all-zero `adjacency.pkl` (no label hierarchy) — plus `overrides.yaml`, which points
+`train.py --task` at each split's dataset and sets the loss, class weights and eval-loss model
+selection. What it skips, since it only makes sense for GO: the MMseqs2 split, the CAZy set, the
+CAFA ground truth and the test FASTA.
+
 Ids in the CSV must match the ones in the dataset. Proteins found in only one of the two are
 skipped, so check the `Number of proteins` lines at the start of training — and if the dataset
 spells ids `<id>_A`, add `--set data.trainval_unfix_type=chain` (and likewise `evalset_`,
@@ -149,7 +177,8 @@ python train.py --task gb1 --stages fusion  # just the fusion gate
 
 Everything a GO run supports works here too — `--stages`, `--weights-*`, `--train-on`, the
 sanity checks, the run directory and its outputs. Step 2 writes the target matrix and an
-`overrides.yaml` under `custom_tasks_dir` (see `configs/paths.yaml`), and `--task` picks it up;
+`overrides.yaml` under `preprocess.custom_tasks_dir` (see `configs/paths.yaml`), and `--task`
+picks it up;
 `--set` still wins over it, e.g. `--set training.use_class_weights=false` to train without
 class weights.
 
@@ -628,7 +657,7 @@ annotations.
 ```
 configs/                      paths, data versions, per-model hyperparameters
 environment.yml               conda environment (GPU)
-preprocess.py                 CLI entry point: inputs -> target matrix + split
+preprocess.py                 CLI entry point: GO inputs or labels CSVs -> target matrix
 train.py                      CLI entry point: training
 calibrate.py                  CLI entry point: per-GO-term calibration for the reports
 validate.ipynb                CAFA evaluation: figures and tables for the paper
@@ -643,8 +672,8 @@ src/deepfri2_trainer/
     predict.py                prediction TSV writing
     outputs.py                wandb session, run dir, artifacts, log.txt, training.log
     import_released.py        import released deepFRI2 checkpoints into runs_dir
-    preprocess.py             target matrix / split / CAZy target construction
-    custom_preprocess.py      target matrix from CSV labels (custom classification/regression)
+    preprocess.py             target matrix from GO: targets / split / CAZy steps, shared config + logging
+    csv_target_matrix.py      target matrix from labels CSVs instead of GO (preprocess.py --task)
     calibrate.py              per-GO-term threshold sweep -> calibration_<run>.json
     sanity.py                 sanity & validation checks
     utils/                    dataloader, training loop, losses

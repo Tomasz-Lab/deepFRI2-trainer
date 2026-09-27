@@ -382,7 +382,7 @@ def load_config(
     raw["model"] = raw[f"{model_type}_model"]
 
     project_location = str(raw["project_location"])
-    for key in ("deepfri2_src", "runs_dir", "custom_tasks_dir"):
+    for key in ("deepfri2_src", "runs_dir"):
         if isinstance(raw.get(key), str):
             raw[key] = raw[key].format(project_location=project_location)
 

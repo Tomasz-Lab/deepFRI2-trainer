@@ -39,12 +39,12 @@ preprocess:
   # Everything preprocess.py writes. The `layout` entries below read from here.
   out_dir: '{project_location}/production/training/data/target_matrix'
 
+  # Custom tasks (labels from a CSV, not GO): `preprocess.py --task NAME` writes
+  # `<custom_tasks_dir>/NAME/`, and `train.py --task NAME` reads it back.
+  custom_tasks_dir: '{project_location}/production/training/data/custom'
+
   # Append-only record of every preprocessing run, the counterpart of runs_dir/training.log
   log_file: '{project_location}/production/training/data/data.log'
-
-# Custom tasks (unused by the GO flow): `preprocess.py --task NAME` writes
-# `<custom_tasks_dir>/NAME/`, and `train.py --task NAME` reads it back.
-custom_tasks_dir: '{project_location}/production/training/data/custom'
 
 # Data-tree layout, relative to `project_location`. Placeholders are filled from the
 # data config: {dataset_name}, {params}, {data_version}, {ontology}, {threshold}.

@@ -118,7 +118,7 @@ from deepfri2_trainer import (  # noqa: E402
     run_stages,
 )
 from deepfri2_trainer.config import _deep_merge, _read_yaml  # noqa: E402
-from deepfri2_trainer.custom_preprocess import task_dir  # noqa: E402
+from deepfri2_trainer.csv_target_matrix import task_dir  # noqa: E402
 
 
 def _parse_overrides(assignments: list[str]) -> dict:
