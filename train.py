@@ -15,7 +15,11 @@ below select what to train and where to run it.
 Parameters
 ----------
 --ontology {MF,CC,BP}
-    Required, except with --import-released.
+    Required, except with --task or --import-released.
+--task NAME
+    A custom task built by `preprocess.py --task NAME`, instead of --ontology. Its
+    `overrides.yaml` is merged in automatically, with --set still winning; everything else
+    below works the same.
 --stages {sequence,structure,fusion} [...]
     Which models to train; default all three, always in sequence -> structure -> fusion order.
     Training `fusion` alone takes its frozen sub-models from `weights.<ontology>` in
@@ -91,6 +95,7 @@ Examples
     python train.py --ontology MF
     python train.py --ontology BP --train-on train+eval
     python train.py --ontology CC --stages fusion
+    python train.py --task gb1
     python train.py --ontology MF --max-steps-per-epoch 2 --set training.num_epochs=1 --no-wandb
 """
 
@@ -112,6 +117,8 @@ from deepfri2_trainer import (  # noqa: E402
     import_released_runs,
     run_stages,
 )
+from deepfri2_trainer.config import _deep_merge, _read_yaml  # noqa: E402
+from deepfri2_trainer.csv_target_matrix import task_dir  # noqa: E402
 
 
 def _parse_overrides(assignments: list[str]) -> dict:
@@ -136,8 +143,14 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="See the module docstring in train.py for the full parameter list.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--ontology", choices=ONTOLOGIES,
-                        help="Gene Ontology namespace to train (required unless --import-released)")
+    namespace_group = parser.add_mutually_exclusive_group()
+    namespace_group.add_argument(
+        "--ontology", choices=ONTOLOGIES,
+        help="Gene Ontology namespace to train (required unless --task or --import-released)")
+    namespace_group.add_argument(
+        "--task", metavar="NAME",
+        help="custom task built by `preprocess.py --task NAME`, instead of --ontology; its "
+             "overrides.yaml is merged in automatically")
     parser.add_argument("--stages", nargs="+", choices=STAGE_ORDER, default=list(STAGE_ORDER),
                         help="models to train (always run in sequence, structure, fusion order)")
     parser.add_argument("--train-on", choices=TRAIN_ON, default="train",
@@ -174,6 +187,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     overrides = _parse_overrides(args.overrides)
+    if args.task:
+        # What preprocess.py recorded about this task; --set still wins over it.
+        recorded = task_dir(args.task, args.config_dir) / "overrides.yaml"
+        if not recorded.is_file():
+            parser.error(f"no custom task {args.task!r}: {recorded} does not exist. Build it "
+                         "first with `python preprocess.py --task ... --train-csv ...`.")
+        overrides = _deep_merge(_read_yaml(recorded), overrides)
     if overrides:
         print(f"config overrides: {overrides}")
 
@@ -185,8 +205,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.ontology is None:
-        parser.error("--ontology is required (unless --import-released)")
+    ontology = args.ontology or args.task
+    if ontology is None:
+        parser.error("--ontology or --task is required (unless --import-released)")
 
     weights = {
         which: name
@@ -195,10 +216,10 @@ def main(argv: list[str] | None = None) -> int:
         if name
     }
     if weights:
-        overrides.setdefault("weights", {}).setdefault(args.ontology, {}).update(weights)
+        overrides.setdefault("weights", {}).setdefault(ontology, {}).update(weights)
 
     run_stages(
-        ontology=args.ontology,
+        ontology=ontology,
         stages=tuple(args.stages),
         train_on=args.train_on,
         device=args.device,

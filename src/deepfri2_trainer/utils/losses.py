@@ -3,6 +3,8 @@
 - ``WeightedFocalLoss`` -- focal loss with per-GO-term class weights; structure model.
 - ``MCLossDAG``         -- max constraint loss (MCLoss) over the direct GO edges; sequence and
   fusion models.
+
+Both are GO-specific; a custom task uses ``masked_bce``, ``cross_entropy`` or ``masked_mse``.
 """
 
 import numpy as np
@@ -35,7 +37,7 @@ class WeightedFocalLoss(nn.Module):
         else:
             self.alpha = None
 
-    def forward(self, inputs, targets, model=None):
+    def forward(self, inputs, targets):
         ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
         pt = torch.exp(-ce_loss)
 
@@ -159,7 +161,7 @@ class MCLossDAG(nn.Module):
                     depth[v] = nv
         return max(depth)
 
-    def forward(self, logits, targets, model=None):
+    def forward(self, logits, targets):
         outputs = torch.sigmoid(logits)
         targets = targets.to(dtype=outputs.dtype)
 
@@ -240,3 +242,30 @@ class MCLossDAG(nn.Module):
 # Renamed to match the source paper. The old name is kept so archived run configs 
 # (`loss.name: MCMLossDAG`) still resolve to the same class.
 MCMLossDAG = MCLossDAG
+
+
+# Losses for a custom task. The logits are cast because autocast leaves them in half
+# precision; the GO losses cast for themselves. NaN in a target marks a missing label.
+
+
+def masked_bce(logits, targets, weights=None):
+    """BCE over the labels that are there; ``weights`` is the per-label pos_weight."""
+    present = ~targets.isnan()
+    pos_weight = None if weights is None else weights.expand_as(targets)[present]
+    return F.binary_cross_entropy_with_logits(
+        logits.float()[present], targets[present], pos_weight=pos_weight)
+
+
+def masked_mse(logits, targets):
+    """MSE over the labels that are there."""
+    present = ~targets.isnan()
+    return F.mse_loss(logits.float()[present], targets[present])
+
+
+def cross_entropy(logits, targets, weights=None):
+    """Softmax cross-entropy against one-hot targets, optionally class-weighted.
+
+    The targets go in as class indices: with one-hot targets PyTorch divides a weighted loss by
+    the batch size rather than by the weights, which isn't a weighted mean.
+    """
+    return F.cross_entropy(logits.float(), targets.argmax(dim=1), weight=weights)

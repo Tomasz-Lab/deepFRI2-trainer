@@ -44,15 +44,33 @@ parameter; the `train.py` docstring documents them in full.
 `validate.ipynb` scores trained runs with the protein-centric **CAFA evaluation** and draws
 the paper's figures and tables — see [CAFA evaluation](#cafa-evaluation) below.
 
+To train on something other than GO — your own classification or regression labels — see
+[Training on your own dataset](#training-on-your-own-dataset).
+
 Not yet wired in: CAFA scores appended to `training.log` at the end of a run (they are computed
-in the notebook for now), and **retraining / fine-tuning** beyond loading initial weights —
-swapping the GO-term head for a regression/classification task, and restricting to a GO-term
-subset.
+in the notebook for now), and restricting a GO run to a subset of terms.
 
 ## Preprocessing
 
-[`preprocess.py`](preprocess.py) turns the primitive inputs into the supervision `train.py`
-consumes. Three steps, each runnable alone:
+[`preprocess.py`](preprocess.py) turns labels into the **target matrix** `train.py` consumes:
+`go_indices` (the model's outputs), `protein_vectors*` (the label of every protein), `weights`
+and `adjacency`. It is one script with two sources of labels, and the source is the only thing
+that differs:
+
+| | GO (default) | Your own labels (`--task NAME`) |
+|---|---|---|
+| Labels come from | the GO annotation tables + GO graph | one CSV per split |
+| Train/eval split | computed here (MMseqs2), or adopted | taken as given: one FRIdata dataset per split |
+| Steps | `targets`, `split`, `cazy` | one: read the CSVs |
+| Code | [`preprocess.py`](src/deepfri2_trainer/preprocess.py) | [`csv_target_matrix.py`](src/deepfri2_trainer/csv_target_matrix.py) — reads the CSVs, writes the same pickles, plus an `overrides.yaml` for `train.py`; config, logging and pickle writing are shared |
+| Output | `<out_dir>/<dataset>/<params>/target_matrix/` | `<custom_tasks_dir>/NAME/target_matrix/` + `overrides.yaml` |
+| Train with | `train.py --ontology MF` | `train.py --task NAME` |
+
+The pickles have the same names and shape either way, so everything from `train.py` on reads
+them the same way. The rest of this section is the GO flow; for your own labels see
+[Training on your own dataset](#training-on-your-own-dataset).
+
+The GO flow has three steps, each runnable alone:
 
 | Step | Produces | Cost |
 |---|---|---|
@@ -93,6 +111,82 @@ new model.
 
 Every run appends its whole console output to `data/data.log`, under a header giving the
 date and the exact command.
+
+## Training on your own dataset
+
+Anything the model can be trained on comes down to structures and labels. Starting from mmCIF
+files and a CSV, there are three steps.
+
+**1. Structures -> a FRIdata dataset, one per split.** Run
+[FRIdata](https://github.com/Tomasz-Lab/FRIdata) over each split's mmCIF directory. That gives
+you a directory with `dataset.json`, `embeddings.idx` / `.h5` (ESM-2) and `distograms.idx` /
+`.h5` — the same thing the GO flow trains on, and the only format this trainer reads.
+
+**2. Labels -> a target matrix.** The same `preprocess.py` as for GO, with `--task`: instead of
+the `targets` / `split` / `cazy` steps it reads one CSV per split, keyed by protein id, and
+keeps the split you give it (see [Preprocessing](#preprocessing) for how the two compare).
+`--ontology`, `--steps` and `--set` do not apply here.
+
+```csv
+protein_id,label
+P12345,1.7
+```
+
+```bash
+python preprocess.py --task gb1 --task-type regression \
+    --train-csv train.csv --train-dataset fridata/train \
+    --eval-csv  valid.csv --eval-dataset  fridata/valid \
+    --test-csv  test.csv  --test-dataset  fridata/test
+```
+
+`--task-type` is required and says what the labels are:
+
+| `--task-type` | Label columns | Model output | Loss |
+|---|---|---|---|
+| `classification` | one, integer class ids | softmax over the classes | cross-entropy, class weights n / (K · n_class) |
+| `multi-task-classification` | two or more, 0/1 | a sigmoid per label | BCE, `pos_weight` = n_neg / n_pos per label |
+| `regression` | one, real values | one value | MSE |
+| `multi-task-regression` | two or more, real values | a value per label | MSE |
+
+A binary task is `classification` with classes 0 and 1. Both kinds of weight are
+scikit-learn's `class_weight="balanced"`, counted on train.
+
+Empty cells are missing labels; they count toward neither the loss nor the metrics, so a
+multi-task CSV doesn't need every protein labelled for every task. The id column defaults to
+`protein_id` and the label column to `label`; name others with `--label-columns y1,y2`.
+
+What it writes, under `<custom_tasks_dir>/<task>/`: `target_matrix/` with the GO flow's pickles
+— `protein_vectors{,_eval,_test}.pkl` (a dense vector per protein; one-hot for classification),
+`go_indices.pkl` (class ids or column names -> output index), `weights.pkl` (as in the table)
+and an all-zero `adjacency.pkl` (no label hierarchy) — plus `overrides.yaml`, which points
+`train.py --task` at each split's dataset and sets the loss, class weights and eval-loss model
+selection. What it skips, since it only makes sense for GO: the MMseqs2 split, the CAZy set, the
+CAFA ground truth and the test FASTA.
+
+Ids in the CSV must match the ones in the dataset. Proteins found in only one of the two are
+skipped, so check the `Number of proteins` lines at the start of training — and if the dataset
+spells ids `<id>_A`, add `--set data.trainval_unfix_type=chain` (and likewise `evalset_`,
+`testset_`) to the training command.
+
+**3. Train.**
+
+```bash
+python train.py --task gb1                  # all three stages
+python train.py --task gb1 --stages fusion  # just the fusion gate
+```
+
+Everything a GO run supports works here too — `--stages`, `--weights-*`, `--train-on`, the
+sanity checks, the run directory and its outputs. Step 2 writes the target matrix and an
+`overrides.yaml` under `preprocess.custom_tasks_dir` (see `configs/paths.yaml`), and `--task`
+picks it up;
+`--set` still wins over it, e.g. `--set training.use_class_weights=false` to train without
+class weights.
+
+What differs from a GO run: the best epoch is picked on eval loss, there's no Fmax and no CAZy
+set (both GO-specific), and the metrics follow the task — accuracy / balanced accuracy /
+macro F1 for classification, P/R/F1 and AUROC for multi-task classification, MSE / RMSE / MAE /
+R2 / Pearson / Spearman for regression. Predictions are softmax or sigmoid probabilities, or
+the predicted values for regression.
 
 ## Architectures: owned here, checked against inference
 
@@ -563,7 +657,7 @@ annotations.
 ```
 configs/                      paths, data versions, per-model hyperparameters
 environment.yml               conda environment (GPU)
-preprocess.py                 CLI entry point: inputs -> target matrix + split
+preprocess.py                 CLI entry point: GO inputs or labels CSVs -> target matrix
 train.py                      CLI entry point: training
 calibrate.py                  CLI entry point: per-GO-term calibration for the reports
 validate.ipynb                CAFA evaluation: figures and tables for the paper
@@ -578,7 +672,8 @@ src/deepfri2_trainer/
     predict.py                prediction TSV writing
     outputs.py                wandb session, run dir, artifacts, log.txt, training.log
     import_released.py        import released deepFRI2 checkpoints into runs_dir
-    preprocess.py             target matrix / split / CAZy target construction
+    preprocess.py             target matrix from GO: targets / split / CAZy steps, shared config + logging
+    csv_target_matrix.py      target matrix from labels CSVs instead of GO (preprocess.py --task)
     calibrate.py              per-GO-term threshold sweep -> calibration_<run>.json
     sanity.py                 sanity & validation checks
     utils/                    dataloader, training loop, losses

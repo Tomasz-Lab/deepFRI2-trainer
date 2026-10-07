@@ -13,6 +13,9 @@ Three steps, independently runnable (``python preprocess.py --help``):
 
 Outputs are written per ontology, under the same names and directory shape the previous notebook
 produced, so a trainer configured at the new root finds everything where it expects it.
+
+Labels that are not GO (``preprocess.py --task``) replace ``targets`` and ``split`` with
+:mod:`.csv_target_matrix`, which reuses this module's config, transcript and pickle writer.
 """
 
 from __future__ import annotations
@@ -232,6 +235,10 @@ class PreprocessConfig:
 
     def ontology_dir(self, ontology: str) -> Path:
         return self.path("out_dir") / self.dataset_name / self.params(ontology)
+
+    def task_dir(self, task: str) -> Path:
+        """A custom task's target matrix and ``overrides.yaml`` (``preprocess.py --task``)."""
+        return self.path("custom_tasks_dir") / task
 
     def cazy_dir(self, ontology: str) -> Path:
         return (self.path("out_dir") / "cazy" / self.data_version / "uniprot"

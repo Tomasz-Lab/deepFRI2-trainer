@@ -7,7 +7,7 @@ model:
   # structure.yaml, so their hyperparameters live there.
 
 training:
-  num_epochs: 15
+  num_epochs: 20
   learning_rate: 1.0e-4
   metric_threshold: 0.3    # used only for reporting train/eval p/r/f1
   # Training keeps two checkpoints: <run>_best.pth (the optimum of selection_metric so far) and
@@ -22,7 +22,12 @@ training:
   # NOTE: with --train-on train+eval the eval split is part of the training set, so every
   # selection_metric is a training metric, rises monotonically, and all three rules collapse to
   # `last`. Selection needs a held-out split to mean anything.
-  selection: best
+  selection: best_min
+  # best_min ignores the warm-up epochs: nothing before selection_min_epoch may ship.
+  # Guards against shipping an opening epoch whose metric is high for the wrong reason
+  # (a classifier collapsed onto the majority class, a correlation on barely-moved
+  # predictions). Set to 1 to recover the old `best` behaviour.
+  selection_min_epoch: 5
   # What `best` means. eval_fmax is the protein-centric Fmax on the eval split with GO-DAG
   # propagation -- the CAFA metric itself, and a near-exact proxy for the benchmark. eval_loss
   # is calibration-sensitive and turns up several epochs earlier than Fmax peaks.

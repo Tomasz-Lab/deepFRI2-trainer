@@ -10,7 +10,12 @@ import torch.nn as nn
 from .config import RunConfig
 from .data import Loaders, Targets
 from .utils.losses import DAGPropagator
-from .utils.training import MCLOSS_NAMES, count_trainable_parameters, train_model
+from .utils.training import (
+    MCLOSS_NAMES,
+    PLAIN_LOSSES,
+    count_trainable_parameters,
+    train_model,
+)
 
 
 def build_loss_kwargs(cfg: RunConfig, targets: Targets, device: str | torch.device) -> dict[str, Any]:
@@ -18,14 +23,14 @@ def build_loss_kwargs(cfg: RunConfig, targets: Targets, device: str | torch.devi
     loss_cfg = cfg.training["loss"]
     name = loss_cfg.get("name")
 
-    if name is None:
-        loss_fn_kwargs = None          # train_model falls back to WeightedFocalLoss
+    if name is None or name in PLAIN_LOSSES:
+        loss_fn_kwargs = None          # WeightedFocalLoss for null; MSE and BCE take no args
     elif name in MCLOSS_NAMES:
         loss_fn_kwargs = {"A": targets.adjacency.to(device), **(loss_cfg.get("kwargs") or {})}
     else:
         raise ValueError(
-            f"unsupported loss {name!r}; configs may use one of {sorted(MCLOSS_NAMES)} or "
-            "null (null selects WeightedFocalLoss)"
+            f"unsupported loss {name!r}; configs may use one of "
+            f"{sorted((*MCLOSS_NAMES, *PLAIN_LOSSES))} or null (null selects WeightedFocalLoss)"
         )
 
     return {
@@ -71,5 +76,7 @@ def run_training(
         on_epoch_end=on_epoch_end,
         propagate=propagate,
         fmax_max_proteins=cfg.training.get("fmax_max_proteins", 10_000),
+        task_kind=targets.task_kind,
+        target_scaler=cfg.target_scaler,
         **loss_args,
     )

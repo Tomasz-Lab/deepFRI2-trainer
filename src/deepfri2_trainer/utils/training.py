@@ -10,17 +10,30 @@ import os
 import random
 import time
 
+from functools import partial
+
 import numpy as np
 import torch
 import torch.optim as optim
 import tqdm
 import wandb
 from scipy.special import expit as sigmoid
+from scipy.special import softmax
 
-from .losses import MCLossDAG, WeightedFocalLoss
+from .losses import MCLossDAG, WeightedFocalLoss, cross_entropy, masked_bce, masked_mse
 
 # `MCMLossDAG` is the pre-rename spelling, still present in archived run configs.
 MCLOSS_NAMES = ("MCLossDAG", "MCMLossDAG")
+
+#: Losses for a custom task: multi-task classification, classification, regression.
+PLAIN_LOSSES = {"BCE": masked_bce, "CE": cross_entropy, "MSE": masked_mse}
+
+#: What the first three numbers of each metric function are called, per task kind.
+METRIC_NAMES = {
+    "multilabel": ("precision", "recall", "f1"),
+    "multiclass": ("accuracy", "balanced_accuracy", "f1"),
+    "regression": ("mse", "mae", "r2"),
+}
 
 
 def format_duration(seconds: float) -> str:
@@ -76,15 +89,36 @@ def initialize_training(
             raw_violation_weight=loss_fn_kwargs.get("raw_violation_weight", 0.0),
             raw_violation_margin=loss_fn_kwargs.get("raw_violation_margin", 0.0),
         )
+    elif loss_fn_name in PLAIN_LOSSES:
+        loss_fn = PLAIN_LOSSES[loss_fn_name]
+        if weights is not None and loss_fn_name != "MSE":  # pos_weight / class weights
+            device = next(model.parameters()).device
+            loss_fn = partial(loss_fn, weights=torch.as_tensor(weights, device=device))
     elif loss_fn_name is None:
         loss_fn = WeightedFocalLoss(alpha=weights)
     else:
         raise ValueError(
-            f"unknown loss_fn_name {loss_fn_name!r}; expected one of {sorted(MCLOSS_NAMES)} "
-            "or None (None selects WeightedFocalLoss)"
+            f"unknown loss_fn_name {loss_fn_name!r}; expected one of "
+            f"{sorted((*MCLOSS_NAMES, *PLAIN_LOSSES))} or None (None selects WeightedFocalLoss)"
         )
 
     return optimizer, loss_fn
+
+
+def output_scores(logits: np.ndarray, task_kind: str | None, scaler=None) -> np.ndarray:
+    """What a model's logits mean as predictions: probabilities, or the values themselves.
+
+    ``scaler`` is a standardised regression task's ``(mean, std)``; predictions are returned
+    in the target's original units, which is what the prediction files carry.
+    """
+    if task_kind == "regression":
+        if scaler is not None:
+            mean, std = scaler
+            return logits * std + mean
+        return logits
+    if task_kind == "multiclass":
+        return softmax(logits, axis=-1)
+    return sigmoid(logits)
 
 
 def process_batch(batch, device, use_embeddings, use_distograms):
@@ -138,7 +172,7 @@ def train_epoch(
         with torch.amp.autocast(torch.device(device).type):
             logits = model(embeds, disto, masks)
 
-        loss = loss_fn(logits, targets, model)
+        loss = loss_fn(logits, targets)
 
         scaler.scale(loss).backward()
         if grad_clip_max_norm is not None and grad_clip_max_norm > 0:
@@ -192,7 +226,7 @@ def evaluate_model(
             )
 
             logits = model(embeds, disto, masks)
-            loss = loss_fn(logits, targets, model)
+            loss = loss_fn(logits, targets)
 
             eval_predictions.append(logits.float().cpu().detach().numpy())
             eval_targets.append(targets.cpu().numpy())
@@ -209,7 +243,7 @@ def evaluate_model(
     return eval_loss, eval_predictions, eval_targets
 
 
-def calculate_metrics(predictions, targets, threshold=0.3):
+def calculate_metrics(predictions, targets, threshold=0.3, compute_auroc=False):
     """Macro-averaged precision / recall / F1 over GO terms, plus micro averages.
 
     Returns ``(macro_precision, macro_recall, macro_f1, extras)``.
@@ -242,9 +276,20 @@ def calculate_metrics(predictions, targets, threshold=0.3):
 
     Vectorized numpy, ~17x faster than sklearn at this problem size (~110K proteins x 5467 GO
     terms) and numerically identical to it (asserted in tests/test_metrics.py).
+
+    ``compute_auroc`` adds AUROC to ``extras``. It is sklearn, looping per class in Python,
+    which is fine for a few labels and far too slow for GO's thousands.
+
+    Missing labels (NaN, from a custom multi-task CSV) count as neither true nor predicted,
+    which takes them out of tp/fp/fn -- the only counts used here.
     """
     preds_bin = (sigmoid(predictions) >= threshold).astype(np.float64)
     t = targets.astype(np.float64)
+    missing = None
+    if np.isnan(t.sum()):  # a single pass over GO-sized arrays, which never have gaps
+        missing = np.isnan(t)
+        t[missing] = 0
+        preds_bin[missing] = 0
     # float64 accumulation: float32 sums over ~10^5 proteins lose enough precision to show up
     # against sklearn.
     tp = (preds_bin * t).sum(axis=0)
@@ -280,11 +325,79 @@ def calculate_metrics(predictions, targets, threshold=0.3):
         "classes_with_support": int((support > 0).sum()),
         "classes_total": int(tp.shape[0]),
     }
+
+    if compute_auroc:
+        from sklearn.metrics import roc_auc_score  # noqa: PLC0415
+
+        aurocs = []
+        for i in range(t.shape[1]):
+            rows = slice(None) if missing is None else ~missing[:, i]
+            labels = t[rows, i]
+            if 0 < labels.sum() < labels.size:  # undefined unless both classes are present
+                aurocs.append(roc_auc_score(labels, predictions[rows, i]))
+        extras["auroc"] = float(np.mean(aurocs)) if aurocs else float("nan")
     return (
         float(np.nanmean(precision)),
         float(np.nanmean(recall)),
         float(np.nanmean(f1)),
         extras,
+    )
+
+
+def calculate_regression_metrics(predictions, targets, scaler=None):
+    """The regression counterpart of :func:`calculate_metrics`, averaged over the tasks.
+
+    Returns ``(mse, mae, r2, extras)`` -- same shape as the classification tuple, so callers
+    need not care which they got. Each task is scored on the proteins that have its label. R2
+    and the correlations are undefined when a task's targets or predictions are constant;
+    those drop out of the mean rather than counting as zero.
+    """
+    from scipy.stats import pearsonr, spearmanr  # noqa: PLC0415
+
+    if scaler is not None:
+        # Undo the training-time standardisation so MSE / RMSE / MAE are in the target's own
+        # units. R2 and the correlations are invariant under this, and come out unchanged.
+        mean, std = scaler
+        predictions = predictions * std + mean
+        targets = targets * std + mean
+
+    per_task = []
+    for y, p in zip(targets.T.astype(np.float64), predictions.T.astype(np.float64)):
+        labelled = ~np.isnan(y)
+        y, p = y[labelled], p[labelled]
+        mse = ((p - y) ** 2).mean()
+        defined = y.size > 1 and y.std() > 0 and p.std() > 0
+        per_task.append((
+            mse,
+            np.abs(p - y).mean(),
+            1 - mse / y.var() if defined else np.nan,
+            pearsonr(y, p)[0] if defined else np.nan,
+            spearmanr(y, p)[0] if defined else np.nan,
+        ))
+    mse, mae, r2, pearson, spearman = np.array(per_task).T
+
+    extras = {
+        "rmse_mean": float(np.nanmean(np.sqrt(mse))),
+        "pearson_mean": float(np.nanmean(pearson)),
+        "spearman_mean": float(np.nanmean(spearman)),
+        "tasks": int(predictions.shape[1]),
+    }
+    return float(np.nanmean(mse)), float(np.nanmean(mae)), float(np.nanmean(r2)), extras
+
+
+def calculate_multiclass_metrics(predictions, targets):
+    """Accuracy, balanced accuracy and macro F1 for one-of-K labels (one-hot targets).
+
+    Same ``(a, b, c, extras)`` shape as the other two metric functions.
+    """
+    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score  # noqa: PLC0415
+
+    y, p = targets.argmax(axis=1), predictions.argmax(axis=1)
+    return (
+        float(accuracy_score(y, p)),
+        float(balanced_accuracy_score(y, p)),
+        float(f1_score(y, p, average="macro", zero_division=0)),
+        {"classes": int(targets.shape[1])},
     )
 
 
@@ -348,6 +461,7 @@ def log_metrics(
     eval_fmax=None,
     train_fmax=None,
     seconds=None,
+    task_kind=None,
 ):
     """Log metrics to console and wandb if enabled."""
     metrics = {
@@ -357,19 +471,15 @@ def log_metrics(
         "train_predictions_std": np.std(all_predictions),
         "eval_predictions_mean": np.mean(eval_predictions),
         "eval_predictions_std": np.std(eval_predictions),
-        "train/precision": prfs_train[0],
-        "train/recall": prfs_train[1],
-        "train/f1": prfs_train[2],
-        "eval/precision": prfs_eval[0],
-        "eval/recall": prfs_eval[1],
-        "eval/f1": prfs_eval[2],
     }
-    # Micro averages and the class counts behind each macro average: the macro numbers are
-    # each over a different subset of GO terms, so they cannot be combined with each other.
+    # The three headline numbers, plus whatever the metric function left in `extras`.
+    names = METRIC_NAMES[task_kind or "multilabel"]  # a GO run is multi-label too
     for split, prfs in (("train", prfs_train), ("eval", prfs_eval)):
-        for key, value in (prfs[3] or {}).items():
-            metrics[f"{split}/{key}"] = value
+        metrics.update({f"{split}/{name}": value for name, value in zip(names, prfs)})
+        metrics.update({f"{split}/{key}": value for key, value in (prfs[3] or {}).items()})
 
+    if task_kind is not None:
+        eval_fmax = train_fmax = None  # Fmax is GO's metric; a custom task leaves it at nan
     if eval_fmax is not None:
         metrics["eval/fmax"], metrics["eval/fmax_threshold"] = eval_fmax
     if train_fmax is not None:
@@ -383,6 +493,23 @@ def log_metrics(
     print(f"Epoch {epoch + 1}" + (f"  [{format_duration(seconds)}]" if seconds else ""))
     print(f"Train - Loss: {train_loss:.4f}")
     print(f"Eval  - Loss: {eval_loss:.4f}")
+
+    if task_kind == "regression":
+        for split, prfs in (("Train", prfs_train), ("Eval ", prfs_eval)):
+            extras = prfs[3] or {}
+            print(
+                f"{split} - MSE/RMSE/MAE/R2: {prfs[0]:.4f}"
+                f" / {extras.get('rmse_mean', float('nan')):.4f} / {prfs[1]:.4f} / {prfs[2]:.4f}"
+                f" | Pearson/Spearman: {extras.get('pearson_mean', float('nan')):.4f}"
+                f" / {extras.get('spearman_mean', float('nan')):.4f}"
+            )
+        return
+    if task_kind == "multiclass":
+        for split, prfs in (("Train", prfs_train), ("Eval ", prfs_eval)):
+            print(f"{split} - accuracy / balanced accuracy / macro F1: "
+                  f"{prfs[0]:.4f} / {prfs[1]:.4f} / {prfs[2]:.4f}")
+        return
+
     if eval_fmax is not None:
         train_part = f"  train {train_fmax[0]:.4f}" if train_fmax is not None else ""
         print(
@@ -399,6 +526,7 @@ def log_metrics(
             f" | GO terms predicted/with support/total:"
             f" {extras.get('classes_predicted')}/{extras.get('classes_with_support')}"
             f"/{extras.get('classes_total')}"
+            + (f" | AUROC: {extras['auroc']:.4f}" if "auroc" in extras else "")
         )
 
 
@@ -420,6 +548,8 @@ def train_model(
     on_epoch_end=None,
     propagate=None,
     fmax_max_proteins: int | None = 10_000,
+    task_kind: str | None = None,
+    target_scaler=None,
 ):
     """
     Universal training function that can use embeddings, distograms, or both.
@@ -441,6 +571,9 @@ def train_model(
         propagate: Optional DAG propagator; enables the protein-centric train/eval Fmax.
         fmax_max_proteins: Cap on proteins used for Fmax (fixed subsample, comparable across
             epochs); keeps the train-split Fmax affordable.
+        task_kind: None for a GO run (macro P/R/F1 + Fmax). A custom task has no Fmax (it
+            stays nan); "multilabel" adds AUROC to P/R/F1, "multiclass" reports accuracy
+            and macro F1, "regression" MSE/MAE/R2.
 
     Returns:
         Trained model and evaluation metrics, including ``history``: one record per epoch.
@@ -485,14 +618,25 @@ def train_model(
                 max_steps_per_epoch=max_steps_per_epoch,
             )
 
-            prfs_train = calculate_metrics(all_predictions, all_targets, threshold)
-            prfs_eval = calculate_metrics(eval_predictions, eval_targets, threshold)
-            eval_fmax = calculate_fmax(
-                eval_predictions, eval_targets, propagate, max_proteins=fmax_max_proteins
-            )
-            train_fmax = calculate_fmax(
-                all_predictions, all_targets, propagate, max_proteins=fmax_max_proteins
-            )
+            if task_kind == "regression":
+                prfs_train = calculate_regression_metrics(all_predictions, all_targets, target_scaler)
+                prfs_eval = calculate_regression_metrics(eval_predictions, eval_targets, target_scaler)
+            elif task_kind == "multiclass":
+                prfs_train = calculate_multiclass_metrics(all_predictions, all_targets)
+                prfs_eval = calculate_multiclass_metrics(eval_predictions, eval_targets)
+            else:
+                auroc = task_kind is not None  # few enough labels for sklearn to keep up
+                prfs_train = calculate_metrics(all_predictions, all_targets, threshold, auroc)
+                prfs_eval = calculate_metrics(eval_predictions, eval_targets, threshold, auroc)
+
+            eval_fmax = train_fmax = (float("nan"), float("nan"))
+            if task_kind is None:
+                eval_fmax = calculate_fmax(
+                    eval_predictions, eval_targets, propagate, max_proteins=fmax_max_proteins
+                )
+                train_fmax = calculate_fmax(
+                    all_predictions, all_targets, propagate, max_proteins=fmax_max_proteins
+                )
 
             log_metrics(
                 train_loss,
@@ -508,6 +652,7 @@ def train_model(
                 eval_fmax=eval_fmax,
                 train_fmax=train_fmax,
                 seconds=time.perf_counter() - epoch_started,
+                task_kind=task_kind,
             )
 
             record = {
@@ -521,6 +666,15 @@ def train_model(
                 "eval_fmax_threshold": eval_fmax[1],
                 "train_fmax": train_fmax[0],
             }
+            # Flatten the headline metrics (accuracy/balanced_accuracy/f1, or mse/mae/r2) onto
+            # the record so `training.selection_metric` can name one. Without this the only
+            # selectable numbers are eval_loss and eval_fmax, and for many-class classification
+            # eval_loss is the wrong thing to select on -- cross-entropy bottoms out early and
+            # then rises while accuracy is still improving.
+            for _name, _value in zip(METRIC_NAMES[task_kind or "multilabel"], prfs_eval):
+                record[f"eval_{_name}"] = float(_value)
+            for _key, _value in (prfs_eval[3] or {}).items():
+                record[f"eval_{_key}"] = float(_value)
             history.append(record)
             if on_epoch_end is not None:
                 on_epoch_end(epoch + 1, model, record)

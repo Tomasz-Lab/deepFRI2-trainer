@@ -10,12 +10,11 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from scipy.special import expit as sigmoid
 from torch.utils.data import DataLoader
 
 from .config import RunConfig
 from .data import Loaders, Targets
-from .utils.training import process_batch
+from .utils.training import output_scores, process_batch
 
 SPLIT_PREFIX = {"eval": "predictions", "test": "predictions_test", "cazy": "predictions_cazy"}
 SPLITS = tuple(SPLIT_PREFIX)
@@ -36,7 +35,11 @@ def write_predictions(
     targets: Targets,
     split: str,
 ) -> Path:
-    """Run inference over ``dataloader`` and write the predictions TSV."""
+    """Run inference over ``dataloader`` and write the predictions TSV.
+
+    Scores are probabilities (sigmoid, or softmax for multi-class) or, for regression, the
+    predicted values themselves.
+    """
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     path = prediction_path(cfg, split)
 
@@ -50,14 +53,15 @@ def write_predictions(
             embed, dist, _target, mask = process_batch(
                 batch, device=device, use_embeddings=cfg.use_embeddings, use_distograms=cfg.use_distograms
             )
-            preds_proba = sigmoid(model(embed, dist, mask).detach().cpu().numpy())
-            for prot_id, pred_proba in zip(batch[0], preds_proba):
-                for go_id, proba in zip(go_terms, pred_proba):
-                    rows.append((prot_id, go_id, proba))
+            preds = output_scores(model(embed, dist, mask).detach().cpu().numpy(),
+                                  targets.task_kind, cfg.target_scaler)
+            for prot_id, pred in zip(batch[0], preds):
+                for go_id, value in zip(go_terms, pred):
+                    rows.append((prot_id, go_id, value))
 
     with open(path, "w") as handle:
-        for prot_id, go_id, proba in rows:
-            handle.write(f"{prot_id}\t{go_id}\t{proba}\n")
+        for prot_id, go_id, value in rows:
+            handle.write(f"{prot_id}\t{go_id}\t{value}\n")
 
     print(f"{split}: {len(rows):,} predictions -> {path}")
     return path
@@ -70,9 +74,13 @@ def write_all_predictions(
     targets: Targets,
     splits: tuple[str, ...] = SPLITS,
 ) -> dict[str, Path]:
-    """Write predictions for the eval, test and CAZy sets."""
+    """Write predictions for eval, test, and CAZy when the run has one.
+
+    CAZy is GO-specific, so a custom task has no CAZy loader and no CAZy file.
+    """
     loader_by_split = {"eval": loaders.eval, "test": loaders.test, "cazy": loaders.cazy}
     return {
         split: write_predictions(model, loader_by_split[split], cfg, targets, split)
         for split in splits
+        if loader_by_split[split] is not None
     }

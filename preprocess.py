@@ -33,12 +33,39 @@ Parameters
 --dry-run
     Print the resolved configuration and check every input exists, then exit.
 
+Custom tasks
+------------
+Labels from a CSV rather than the GO tables, with the split taken as given: one CSV and one
+FRIdata dataset per split, all three required. This replaces the three steps above, and
+--ontology, --steps and --set do not apply; the target matrix it writes has the same pickles
+as the GO one, plus an overrides.yaml that `train.py --task NAME` reads.
+
+--task NAME
+    Task name; names the output directory and is what `train.py --task NAME` reads back.
+--task-type {classification,multi-task-classification,regression,multi-task-regression}
+    Required. Classification takes one column of integer class ids (softmax over the
+    classes); multi-task classification takes two or more 0/1 columns (a sigmoid each).
+    Regression takes one column, multi-task regression two or more.
+--train-csv, --eval-csv, --test-csv PATH
+    Labels CSV for each split.
+--train-dataset, --eval-dataset, --test-dataset DIR
+    FRIdata dataset directory for each split.
+--id-column NAME
+    Protein id column in the CSVs (default `protein_id`).
+--label-columns NAME[,NAME...]
+    Label column(s), default `label`. Empty cells are missing labels.
+
 Examples
 --------
     python preprocess.py --dry-run
     python preprocess.py --ontology MF
     python preprocess.py --ontology MF --steps split
     python preprocess.py --ontology MF CC BP --set annotation_threshold=70
+
+    python preprocess.py --task gb1 --task-type regression \\
+        --train-csv train.csv --train-dataset fridata/train \\
+        --eval-csv  valid.csv --eval-dataset  fridata/valid \\
+        --test-csv  test.csv  --test-dataset  fridata/test
 """
 
 from __future__ import annotations
@@ -53,6 +80,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 import yaml  # noqa: E402
 
 from deepfri2_trainer.config import ONTOLOGIES  # noqa: E402
+from deepfri2_trainer import csv_target_matrix  # noqa: E402
 from deepfri2_trainer.preprocess import STEPS, PreprocessConfig, run  # noqa: E402
 
 
@@ -114,7 +142,51 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--set", dest="overrides", action="append", metavar="KEY=VALUE")
     parser.add_argument("--config-dir", default=None)
     parser.add_argument("--dry-run", action="store_true")
+
+    # Custom task: one labels CSV + one FRIdata dataset directory per split.
+    custom = parser.add_argument_group("custom task (labels from a CSV, split taken as given)")
+    custom.add_argument("--task", metavar="NAME", help="task name, used for output dir naming "
+                        "and later as `train.py --task NAME`")
+    custom.add_argument("--task-type", choices=list(csv_target_matrix.TASK_TYPES),
+                        help="what the labels are; required for a custom task")
+    custom.add_argument("--id-column", default="protein_id", metavar="NAME",
+                        help="protein id column in the labels CSVs")
+    custom.add_argument("--label-columns", default=None, metavar="NAME[,NAME...]",
+                        help="comma-separated label column(s), default 'label'; needed for "
+                             "a multi-task CSV or a differently named column")
+    for split in csv_target_matrix.SPLITS:
+        custom.add_argument(f"--{split}-csv", type=Path, metavar="PATH",
+                            help=f"labels CSV for the {split} split")
+        custom.add_argument(f"--{split}-dataset", type=Path, metavar="DIR",
+                            help=f"already-built FRIdata dataset directory for the {split} split")
     args = parser.parse_args(argv)
+
+    splits = {
+        split: (getattr(args, f"{split}_csv"), getattr(args, f"{split}_dataset"))
+        for split in csv_target_matrix.SPLITS
+    }
+    if args.task or any(path for paths in splits.values() for path in paths):
+        incomplete = [split for split, paths in splits.items() if not all(paths)]
+        if not args.task or not args.task_type or incomplete:
+            parser.error("a custom task needs --task, --task-type, and --<split>-csv and "
+                         f"--<split>-dataset for every split; incomplete: {incomplete or ['(none)']}")
+        if args.overrides:
+            # --set tunes the GO preprocessing config, which this path never reads.
+            parser.error("--set does not apply to a custom task; pass it to train.py instead")
+        out_dir = csv_target_matrix.task_dir(args.task, args.config_dir)
+        if args.dry_run:
+            for split, (csv_path, dataset_path) in splits.items():
+                print(f"{split:<8}: {csv_path} ({'ok' if csv_path.is_file() else 'MISSING'}) "
+                      f"+ {dataset_path} ({'ok' if dataset_path.is_dir() else 'MISSING'})")
+            print(f"{'output':<8}: {out_dir}")
+            return 0
+        csv_target_matrix.run(
+            task=args.task, task_type=args.task_type, splits=splits, id_column=args.id_column,
+            label_columns=args.label_columns.split(",") if args.label_columns else None,
+            config_dir=args.config_dir,
+            command=" ".join(["python", Path(__file__).name, *(argv or sys.argv[1:])]),
+        )
+        return 0
 
     # keep the canonical order regardless of the order given on the command line
     ontologies = [o for o in ONTOLOGIES if o in args.ontology]
