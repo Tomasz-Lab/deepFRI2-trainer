@@ -122,6 +122,12 @@ files and a CSV, there are three steps.
 you a directory with `dataset.json`, `embeddings.idx` / `.h5` (ESM-2) and `distograms.idx` /
 `.h5` — the same thing the GO flow trains on, and the only format this trainer reads.
 
+`dataset.json` records the FRIdata root as it stood when the dataset was *built*, which goes
+stale the moment the tree is moved or remounted. When that recorded path no longer exists the
+loader falls back to the index's own location — the index sits at `<root>/datasets/<name>/` and
+its entries are relative to `<root>`, so the directory layout gives the real root. A dataset
+carrying a dead path therefore still loads, instead of failing on a missing `.h5`.
+
 **2. Labels -> a target matrix.** The same `preprocess.py` as for GO, with `--task`: instead of
 the `targets` / `split` / `cazy` steps it reads one CSV per split, keyed by protein id, and
 keeps the split you give it (see [Preprocessing](#preprocessing) for how the two compare).
@@ -159,14 +165,30 @@ What it writes, under `<custom_tasks_dir>/<task>/`: `target_matrix/` with the GO
 — `protein_vectors{,_eval,_test}.pkl` (a dense vector per protein; one-hot for classification),
 `go_indices.pkl` (class ids or column names -> output index), `weights.pkl` (as in the table)
 and an all-zero `adjacency.pkl` (no label hierarchy) — plus `overrides.yaml`, which points
-`train.py --task` at each split's dataset and sets the loss, class weights and eval-loss model
-selection. What it skips, since it only makes sense for GO: the MMseqs2 split, the CAZy set, the
+`train.py --task` at each split's dataset and sets the loss, class weights, the detected id
+spelling, the regression target scaler and the model-selection metric (see
+[Which metric to select on](#which-metric-to-select-on)). What it skips, since it only makes sense for GO: the MMseqs2 split, the CAZy set, the
 CAFA ground truth and the test FASTA.
 
 Ids in the CSV must match the ones in the dataset. Proteins found in only one of the two are
-skipped, so check the `Number of proteins` lines at the start of training — and if the dataset
-spells ids `<id>_A`, add `--set data.trainval_unfix_type=chain` (and likewise `evalset_`,
-`testset_`) to the training command.
+skipped, so check the `Number of proteins` lines at the start of training.
+
+**Id spelling is detected, not configured.** FRIdata keys its indices `<id>_A` or
+`AF-<id>-F1-model_v4_A` depending on how the dataset was built, while the CSV carries the bare
+id. `preprocess.py` reads the dataset's own `embeddings.idx`, works out which spelling matches,
+and records it as `data.<split>_unfix_type` in `overrides.yaml`; the summary line per split
+prints what it found (`[ids: chain]`). Getting this wrong matches nothing and yields an *empty*
+dataset rather than an error, which is why it is not left to the caller. `--set
+data.trainval_unfix_type=…` still overrides it.
+
+**Regression targets are standardised.** A target on its natural scale can be hostile to a
+zero-initialised head: FLIP's Rhomax is 460-622, so the MSE starts near 290 000 and 20 epochs at
+1e-4 never recover — that run ended at R2 -389. `preprocess.py` z-scores regression targets using
+the **train split only**, so no eval or test statistic leaks into training, and records the
+factors as `data.target_scaler` in `overrides.yaml`. Training runs in standardised space;
+`output_scores()` and the regression metrics invert it, so the prediction TSVs and every reported
+MSE / RMSE / MAE are in the target's own units. R2 and the correlations are invariant either
+way. A constant target is left alone.
 
 **3. Train.**
 
@@ -182,8 +204,9 @@ picks it up;
 `--set` still wins over it, e.g. `--set training.use_class_weights=false` to train without
 class weights.
 
-What differs from a GO run: the best epoch is picked on eval loss, there's no Fmax and no CAZy
-set (both GO-specific), and the metrics follow the task — accuracy / balanced accuracy /
+What differs from a GO run: the best epoch is picked on the task's own metric — accuracy for
+classification, Spearman for regression, rather than Fmax — there's no Fmax and no CAZy set
+(both GO-specific), and the metrics follow the task — accuracy / balanced accuracy /
 macro F1 for classification, P/R/F1 and AUROC for multi-task classification, MSE / RMSE / MAE /
 R2 / Pearson / Spearman for regression. Predictions are softmax or sigmoid probabilities, or
 the predicted values for regression.
@@ -282,9 +305,10 @@ python train.py --ontology MF --set training.num_epochs=5 data.batch_size=16
 
 Defaults reproduce the released checkpoints: annotation threshold 50, data version `20250908`,
 GO version `20250722`; sequence 20 epochs @ 1e-4 with `MCLossDAG`, structure 20 epochs @ 2e-4
-with `WeightedFocalLoss` and class weights, fusion 15 epochs @ 1e-4 with `MCLossDAG`. The one
-deliberate departure is `selection: best` (see below). `run.sh` records the exact command for
-every released model.
+with `WeightedFocalLoss` and class weights, fusion 20 epochs @ 1e-4 with `MCLossDAG`. The
+deliberate departures are `selection: best_min` with `selection_min_epoch: 5` (see below), and
+fusion running the same 20 epochs as the other two stages rather than 15. `run.sh` records the
+exact command for every released model.
 
 ### Checkpoint selection
 
@@ -297,7 +321,17 @@ the only epochs a run can ship.** `training.selection` decides which of them bec
 |---|---|
 | `last` | the final epoch — what the originally released models used |
 | `best_strict` | the optimum of `training.selection_metric`, whenever it occurred |
-| `best` (default) | the final epoch when it is within `selection_tolerance` of the optimum, the optimum otherwise |
+| `best` | the final epoch when it is within `selection_tolerance` of the optimum, the optimum otherwise |
+| `best_min` (default) | `best_strict` over the epochs from `training.selection_min_epoch` (default 5) onwards; the warm-up epochs can never ship |
+
+`best_min` exists because an opening epoch can score well for the wrong reason: a classifier that
+has collapsed onto the majority class, or a correlation computed on predictions that have barely
+moved off their initialisation. Those are not checkpoints worth shipping, and on a metric that is
+noisy early, `best`/`best_strict` will happily pick one. The guard applies to the **rolling**
+`_best.pth` as well as to the final choice — it has to, because only two checkpoints exist on
+disk, so letting an ineligible epoch win `_best.pth` would leave the selection naming weights
+that were overwritten. Set `selection_min_epoch: 1` to recover plain `best_strict`. If training
+is shorter than the guard, nothing is eligible and the final epoch ships.
 
 Both files survive the run, and `config_<run>.yaml` records the shipped epoch
 (`provenance.selected_epoch`, `provenance.selected_checkpoint`), so the other option can be
@@ -338,6 +372,28 @@ equally; micro F1 falls at the same time because the bulk of predictions is degr
 them is CAFA. Fmax is.
 
 `selection_metric: eval_loss` is available if you want the conservative criterion.
+
+For a **custom task** there is no Fmax, so the choice is between eval loss and the metric the
+task is actually judged by. The full set, from `SELECTION_METRICS` in `config.py` — `eval_loss`
+is the only one minimised, every other is maximised:
+
+| task kind | selectable | `preprocess.py --task` default |
+|---|---|---|
+| any | `eval_fmax`, `eval_loss` | — |
+| `classification` | `eval_accuracy`, `eval_balanced_accuracy`, `eval_f1` | `eval_accuracy` |
+| `multi-task-classification` | `eval_precision`, `eval_recall`, `eval_f1` | `eval_f1` |
+| `regression` | `eval_r2`, `eval_spearman_mean`, `eval_pearson_mean` | `eval_spearman_mean` |
+
+**Do not select a many-class classification task on `eval_loss`.** Cross-entropy bottoms out
+long before accuracy peaks and then rises while accuracy is still climbing, so the run ships a
+badly undertrained checkpoint. On a 1195-class fold-classification task the loss minimum landed
+at epoch 6/20 with accuracy 0.299, while epoch 17 reached 0.516 — roughly half the accuracy the
+same run had already trained, thrown away by the selection rule. For **regression** `eval_loss`
+is fine, because it *is* the MSE; but if the benchmark reports a rank correlation, select on
+`eval_spearman_mean` so the thing being optimised for and the thing being reported agree.
+
+These all come from the headline metrics that `train_model()` flattens onto each epoch record,
+so anything the metrics table prints can be selected on.
 
 `training.selection_tolerance` (default 0.002) keeps the **final** epoch when it is no more
 than that below the optimum. Fmax wobbles by a few thousandths between epochs, and without it a
