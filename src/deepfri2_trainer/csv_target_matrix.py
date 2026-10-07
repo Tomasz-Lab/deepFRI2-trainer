@@ -27,6 +27,7 @@ What it does not do, because the GO flow's reasons for it do not apply: no MMseq
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -128,22 +129,66 @@ def read_labels(csv_paths: dict[str, Path], task_type: str, id_column: str = "pr
     return go_indices, vectors, weights
 
 
-def _overrides(task: str, task_kind: str, splits: dict, target_matrix_dir: Path) -> dict:
+def detect_unfix_type(dataset_dir: Path, sample_ids) -> str | None:
+    """How this FRIdata dataset spells the CSV's protein ids, or None if it spells them as-is.
+
+    FRIdata keys its indices `<id>_A` (chain) or `AF-<id>-F1-model_v4_A` (AFDB) depending on
+    how the dataset was built, while a labels CSV carries the bare id. Getting this wrong
+    matches nothing and yields an empty dataset rather than an error, so it is detected here
+    from the dataset's own index instead of being left to `--set data.<split>_unfix_type=`.
+    """
+    index = Path(dataset_dir) / "embeddings.idx"
+    if not index.is_file():
+        return None
+    try:
+        keys = set(json.loads(index.read_text()))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    sample = [str(i) for i in list(sample_ids)[:100]]
+    if not sample:
+        return None
+    # Most hits wins; a dataset built from a different id namespace matches none of them.
+    scores = {
+        None: sum(i in keys for i in sample),
+        "chain": sum(f"{i}_A" in keys for i in sample),
+        "AFDB_v4": sum(f"AF-{i}-F1-model_v4_A" in keys for i in sample),
+    }
+    best = max(scores, key=lambda k: scores[k])
+    return best if scores[best] else None
+
+
+def _overrides(task: str, task_kind: str, splits: dict, target_matrix_dir: Path,
+               unfix_types: dict[str, str | None] | None = None,
+               target_scaler: dict | None = None) -> dict:
     """The config `train.py --task NAME` merges over configs/ to train this task.
 
     Each split points straight at its own dataset directory, in place of the GO flow's
-    `dataset_name` + suffix. `unfix_type: null` means the CSV's ids are the dataset's ids; a
-    dataset spelling them `<id>_A` needs `--set data.trainval_unfix_type=chain`.
+    `dataset_name` + suffix, and carries the id spelling detected by `detect_unfix_type`.
     """
     data: dict = {"dataset_name": task, "task_kind": task_kind}
     for split, (key, _) in SPLITS.items():
         data[f"{key}_dataset"] = str(Path(splits[split][1]).resolve())
-        data[f"{key}_unfix_type"] = None
+        data[f"{key}_unfix_type"] = (unfix_types or {}).get(split)
+    if target_scaler is not None:
+        data["target_scaler"] = target_scaler
 
     training = {
         "loss": {"name": {"multiclass": "CE", "multilabel": "BCE", "regression": "MSE"}[task_kind]},
         "use_class_weights": task_kind != "regression",
-        "selection_metric": "eval_loss",
+        # For regression eval_loss IS the MSE, so selecting on it is right. For many-class
+        # classification it is not: cross-entropy bottoms out early and then rises while
+        # accuracy keeps improving, so selecting on loss ships an undertrained checkpoint.
+        # The metric each benchmark actually reports:
+        #   PEER  -- accuracy for solubility / subcellular / binary localisation / fold
+        #            classification; Spearman rho for fluorescence / stability / beta-lactamase
+        #   FLIP  -- Spearman rho for GB1, AAV, Meltome (thermostability)
+        #   FLIP2 -- Spearman rho for amylase, IRED, NucB, hydrophobic core, rhomax, PDZ3
+        # So: classification -> accuracy, regression -> Spearman. Selecting on eval_loss ships
+        # an undertrained checkpoint for many-class problems and optimises the wrong thing for
+        # a ranking metric.
+        "selection_metric": {"multiclass": "eval_accuracy",
+                             "multilabel": "eval_f1"}.get(task_kind, "eval_spearman_mean"),
     }
     return {
         "data": data,
@@ -185,10 +230,36 @@ def run(
         go_indices, vectors, weights = read_labels(
             {split: csv_path for split, (csv_path, _) in splits.items()}, task_type, id_column,
             label_columns)
+
+        # Regression targets are standardised on the TRAIN split, so no eval/test statistic
+        # leaks into training. Without it a target on its natural scale (FLIP Rhomax is
+        # 460-622) starts the MSE at ~290k against a zero-initialised head and never
+        # recovers. Metrics and prediction files are converted back, so what a run reports
+        # stays in the original units; R2 and the correlations are unchanged either way.
+        target_scaler = None
+        if task_kind == "regression":
+            train_rows = torch.stack(list(vectors["train"].values())).double()
+            mean = torch.nanmean(train_rows, dim=0)
+            centered = train_rows - mean
+            std = (torch.nanmean(centered * centered, dim=0)).sqrt()
+            std[~torch.isfinite(std) | (std == 0)] = 1.0   # a constant target stays as it is
+            for split in vectors:
+                vectors[split] = {
+                    pid: ((row.double() - mean) / std).float()
+                    for pid, row in vectors[split].items()
+                }
+            target_scaler = {"mean": [float(v) for v in mean], "std": [float(v) for v in std]}
+
+        unfix_types = {}
+        for split, (_, dataset_dir) in splits.items():
+            unfix_types[split] = detect_unfix_type(dataset_dir, vectors[split].keys())
+
         for split, (_, pickle_name) in SPLITS.items():
             save(pickle_name, vectors[split])
+            spelling = unfix_types[split]
             print(f"{split:<6}: {len(vectors[split])} proteins from {splits[split][0]}, "
-                  f"structures {splits[split][1]}")
+                  f"structures {splits[split][1]} "
+                  f"[ids: {'<id>' if spelling is None else spelling}]")
 
         save("go_indices.pkl", go_indices)
         save("weights.pkl", weights)
@@ -197,12 +268,17 @@ def run(
 
         overrides_path = out_dir / "overrides.yaml"
         overrides_path.write_text(yaml.safe_dump(
-            _overrides(task, task_kind, splits, target_matrix_dir), sort_keys=False))
+            _overrides(task, task_kind, splits, target_matrix_dir, unfix_types, target_scaler),
+            sort_keys=False))
 
         rule("summary")
         print(f"{task_type}, {len(go_indices)} output(s): {', '.join(go_indices)}")
         if task_kind != "regression":
             print("class weights: " + ", ".join(f"{w:.2f}" for w in weights))
+        elif target_scaler is not None:
+            print("target standardised on train: "
+                  + ", ".join(f"{n} mean={m:.4g} std={d:.4g}" for n, m, d
+                              in zip(go_indices, target_scaler["mean"], target_scaler["std"])))
         print(f"wrote {out_dir}")
         print(f"train with: python train.py --task {task}")
 

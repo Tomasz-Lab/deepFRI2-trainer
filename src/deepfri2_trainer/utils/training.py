@@ -105,9 +105,16 @@ def initialize_training(
     return optimizer, loss_fn
 
 
-def output_scores(logits: np.ndarray, task_kind: str | None) -> np.ndarray:
-    """What a model's logits mean as predictions: probabilities, or the values themselves."""
+def output_scores(logits: np.ndarray, task_kind: str | None, scaler=None) -> np.ndarray:
+    """What a model's logits mean as predictions: probabilities, or the values themselves.
+
+    ``scaler`` is a standardised regression task's ``(mean, std)``; predictions are returned
+    in the target's original units, which is what the prediction files carry.
+    """
     if task_kind == "regression":
+        if scaler is not None:
+            mean, std = scaler
+            return logits * std + mean
         return logits
     if task_kind == "multiclass":
         return softmax(logits, axis=-1)
@@ -337,7 +344,7 @@ def calculate_metrics(predictions, targets, threshold=0.3, compute_auroc=False):
     )
 
 
-def calculate_regression_metrics(predictions, targets):
+def calculate_regression_metrics(predictions, targets, scaler=None):
     """The regression counterpart of :func:`calculate_metrics`, averaged over the tasks.
 
     Returns ``(mse, mae, r2, extras)`` -- same shape as the classification tuple, so callers
@@ -346,6 +353,13 @@ def calculate_regression_metrics(predictions, targets):
     those drop out of the mean rather than counting as zero.
     """
     from scipy.stats import pearsonr, spearmanr  # noqa: PLC0415
+
+    if scaler is not None:
+        # Undo the training-time standardisation so MSE / RMSE / MAE are in the target's own
+        # units. R2 and the correlations are invariant under this, and come out unchanged.
+        mean, std = scaler
+        predictions = predictions * std + mean
+        targets = targets * std + mean
 
     per_task = []
     for y, p in zip(targets.T.astype(np.float64), predictions.T.astype(np.float64)):
@@ -535,6 +549,7 @@ def train_model(
     propagate=None,
     fmax_max_proteins: int | None = 10_000,
     task_kind: str | None = None,
+    target_scaler=None,
 ):
     """
     Universal training function that can use embeddings, distograms, or both.
@@ -604,8 +619,8 @@ def train_model(
             )
 
             if task_kind == "regression":
-                prfs_train = calculate_regression_metrics(all_predictions, all_targets)
-                prfs_eval = calculate_regression_metrics(eval_predictions, eval_targets)
+                prfs_train = calculate_regression_metrics(all_predictions, all_targets, target_scaler)
+                prfs_eval = calculate_regression_metrics(eval_predictions, eval_targets, target_scaler)
             elif task_kind == "multiclass":
                 prfs_train = calculate_multiclass_metrics(all_predictions, all_targets)
                 prfs_eval = calculate_multiclass_metrics(eval_predictions, eval_targets)
@@ -651,6 +666,15 @@ def train_model(
                 "eval_fmax_threshold": eval_fmax[1],
                 "train_fmax": train_fmax[0],
             }
+            # Flatten the headline metrics (accuracy/balanced_accuracy/f1, or mse/mae/r2) onto
+            # the record so `training.selection_metric` can name one. Without this the only
+            # selectable numbers are eval_loss and eval_fmax, and for many-class classification
+            # eval_loss is the wrong thing to select on -- cross-entropy bottoms out early and
+            # then rises while accuracy is still improving.
+            for _name, _value in zip(METRIC_NAMES[task_kind or "multilabel"], prfs_eval):
+                record[f"eval_{_name}"] = float(_value)
+            for _key, _value in (prfs_eval[3] or {}).items():
+                record[f"eval_{_key}"] = float(_value)
             history.append(record)
             if on_epoch_end is not None:
                 on_epoch_end(epoch + 1, model, record)

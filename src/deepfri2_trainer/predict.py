@@ -53,7 +53,8 @@ def write_predictions(
             embed, dist, _target, mask = process_batch(
                 batch, device=device, use_embeddings=cfg.use_embeddings, use_distograms=cfg.use_distograms
             )
-            preds = output_scores(model(embed, dist, mask).detach().cpu().numpy(), targets.task_kind)
+            preds = output_scores(model(embed, dist, mask).detach().cpu().numpy(),
+                                  targets.task_kind, cfg.target_scaler)
             for prot_id, pred in zip(batch[0], preds):
                 for go_id, value in zip(go_terms, pred):
                     rows.append((prot_id, go_id, value))

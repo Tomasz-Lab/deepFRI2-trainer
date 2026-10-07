@@ -82,11 +82,14 @@ class StageResult:
 
 
 #: selection metric -> (key, "higher is better"?)
-SELECTION_METRICS = {"eval_fmax": ("eval_fmax", True), "eval_loss": ("eval_loss", False)}
+# SELECTION_METRICS lives in config.py so RunConfig's validator and the selection
+# logic here can never disagree about what is selectable.
+from .config import SELECTION_METRICS  # noqa: E402,F401
 
 
 def select_epoch(
-    history: list[dict], selection: str, metric: str = "eval_fmax", tolerance: float = 0.0
+    history: list[dict], selection: str, metric: str = "eval_fmax", tolerance: float = 0.0,
+    min_epoch: int = 1,
 ) -> tuple[dict, str]:
     """The epoch whose weights the run ships, and which rolling checkpoint holds them.
 
@@ -114,10 +117,15 @@ def select_epoch(
         return history[-1], "last"
 
     key, higher_is_better = SELECTION_METRICS[metric]
-    optimum_record = (max if higher_is_better else min)(history, key=lambda r: r[key])
+    # `best_min` ignores the warm-up epochs entirely. If training was shorter than the guard,
+    # nothing is eligible and the final epoch is the only honest answer.
+    eligible = history
+    if selection == "best_min":
+        eligible = [r for r in history if r["epoch"] >= min_epoch] or history[-1:]
+    optimum_record = (max if higher_is_better else min)(eligible, key=lambda r: r[key])
     if optimum_record["epoch"] == history[-1]["epoch"]:
         return history[-1], "last"
-    if selection == "best_strict":
+    if selection in ("best_strict", "best_min"):
         return optimum_record, "best"
 
     slack = (history[-1][key] - optimum_record[key]) * (1 if higher_is_better else -1)
@@ -215,8 +223,14 @@ def run_stage(
         # recent one. Keeping every epoch would cost 20x the disk for weights nothing reads.
         key, higher_is_better = SELECTION_METRICS[cfg.selection_metric]
         best_so_far: dict = {}
+        # `best_min` must gate the ROLLING checkpoint too, not just the final choice: only
+        # _best.pth and _last.pth survive, so an ineligible early epoch winning _best.pth would
+        # leave select_epoch naming weights that were overwritten and never saved.
+        min_epoch = cfg.selection_min_epoch if cfg.selection == "best_min" else 1
 
         def improved(record: dict) -> bool:
+            if record["epoch"] < min_epoch:
+                return False
             if not best_so_far:
                 return True
             return (record[key] > best_so_far[key]) if higher_is_better else (
@@ -230,10 +244,11 @@ def run_stage(
                 best_so_far.update(record)
                 torch.save(trained.state_dict(), cfg.candidate_checkpoint_path("best"))
                 kept = "best+last"
-            print(
-                f"epoch {epoch}: {key}={record[key]:.4f} -> {kept} "
-                f"(best so far: epoch {best_so_far['epoch']}, {best_so_far[key]:.4f})"
-            )
+            if best_so_far:
+                tail = f"(best so far: epoch {best_so_far['epoch']}, {best_so_far[key]:.4f})"
+            else:
+                tail = f"(warm-up: not eligible until epoch {min_epoch})"
+            print(f"epoch {epoch}: {key}={record[key]:.4f} -> {kept} {tail}")
 
         try:
             model, metrics = run_training(
@@ -251,7 +266,7 @@ def run_stage(
         history = metrics["history"]
         tolerance = float(cfg.training.get("selection_tolerance", 0.0))
         selected, checkpoint = select_epoch(
-            history, cfg.selection, cfg.selection_metric, tolerance
+            history, cfg.selection, cfg.selection_metric, tolerance, cfg.selection_min_epoch
         )
         metrics["selected"] = selected
         metrics["selected_checkpoint"] = checkpoint

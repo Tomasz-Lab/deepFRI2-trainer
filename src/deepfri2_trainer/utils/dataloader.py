@@ -47,8 +47,15 @@ def _unfix_protein_name(protein_id: str, unfix_type: str | None = None) -> str:
 def _load_id_mapping(config: dict, idx_path: Path) -> dict:
     with open(idx_path, "r") as f:
         mapping = json.load(f)
-    base = config["config"]["data_path"] + "/"
-    return {k.replace(".pdb", ""): base + v for k, v in mapping.items()}
+
+    # dataset.json records the FRIdata root as it was at build time, which is wrong as soon
+    # as the tree is moved or remounted (some datasets here still say /mnt/vdb2). The index
+    # sits at <root>/datasets/<name>/<kind>.idx and its values are relative to <root>, so the
+    # directory layout gives the real root; fall back to it when the recorded one is gone.
+    base = Path(config["config"]["data_path"])
+    if not base.is_dir():
+        base = idx_path.resolve().parents[2]
+    return {k.replace(".pdb", ""): f"{base}/{v}" for k, v in mapping.items()}
 
 
 def pad_embedding(embedding: torch.Tensor, max_len: int, emb_size: int) -> torch.Tensor:

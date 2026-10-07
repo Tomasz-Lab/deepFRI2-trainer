@@ -77,5 +77,6 @@ def run_training(
         propagate=propagate,
         fmax_max_proteins=cfg.training.get("fmax_max_proteins", 10_000),
         task_kind=targets.task_kind,
+        target_scaler=cfg.target_scaler,
         **loss_args,
     )

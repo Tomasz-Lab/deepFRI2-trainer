@@ -201,7 +201,8 @@ def check_fusion_branches(
         table = pd.read_csv(path, delimiter="\t", header=None, names=["protein", "go_term", "score"])
         expected = table[table["protein"] == protein]["score"].to_numpy()
         assert expected.size, f"{protein} has no predictions in {path}"
-        scores = output_scores(logits[prot_idx].detach().float().cpu().numpy(), cfg.task_kind)
+        scores = output_scores(logits[prot_idx].detach().float().cpu().numpy(), cfg.task_kind,
+                               cfg.target_scaler)
         np.testing.assert_allclose(scores, expected, rtol=rtol, atol=atol)
         print(f"  {branch} branch matches {path.name}")
         return True

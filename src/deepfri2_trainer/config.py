@@ -19,10 +19,31 @@ from typing import Any
 import torch
 import yaml
 
+#: ``training.selection_metric`` -> (epoch-record key, higher_is_better). eval_loss is the only
+#: one minimised. Everything but eval_fmax/eval_loss comes from the headline metrics that
+#: train_model() flattens onto each epoch record, so a run can select on the metric the task is
+#: actually benchmarked by -- accuracy for multi-class classification, where selecting on
+#: cross-entropy ships an undertrained checkpoint.
+SELECTION_METRICS = {
+    "eval_fmax": ("eval_fmax", True),
+    "eval_loss": ("eval_loss", False),
+    "eval_accuracy": ("eval_accuracy", True),
+    "eval_balanced_accuracy": ("eval_balanced_accuracy", True),
+    "eval_f1": ("eval_f1", True),
+    "eval_precision": ("eval_precision", True),
+    "eval_recall": ("eval_recall", True),
+    "eval_r2": ("eval_r2", True),
+    "eval_spearman_mean": ("eval_spearman_mean", True),
+    "eval_pearson_mean": ("eval_pearson_mean", True),
+}
+
 ONTOLOGIES = ("MF", "CC", "BP")
 MODEL_TYPES = ("sequence", "structure", "fusion")
 TRAIN_ON = ("train", "train+eval")
-SELECTIONS = ("best", "best_strict", "last")
+SELECTIONS = ("best", "best_strict", "best_min", "last")
+
+#: Default warm-up for the ``best_min`` rule: epochs before this are never eligible to ship.
+DEFAULT_SELECTION_MIN_EPOCH = 5
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "configs"
@@ -97,13 +118,28 @@ class RunConfig:
 
     @property
     def selection_metric(self) -> str:
-        """What ``best`` means: ``eval_fmax`` (maximise) or ``eval_loss`` (minimise)."""
+        """What ``best`` means. See :data:`SELECTION_METRICS`; all but eval_loss are maximised."""
         metric = str(self.training.get("selection_metric", "eval_fmax"))
-        if metric not in ("eval_fmax", "eval_loss"):
+        if metric not in SELECTION_METRICS:
             raise ValueError(
-                f"training.selection_metric must be 'eval_fmax' or 'eval_loss', got {metric!r}"
+                f"training.selection_metric must be one of {sorted(SELECTION_METRICS)}, "
+                f"got {metric!r}"
             )
         return metric
+
+    @property
+    def selection_min_epoch(self) -> int:
+        """First epoch the ``best_min`` rule may ship (1-based). Earlier epochs are ignored.
+
+        A guard against selecting a checkpoint from the opening epochs, where a metric can be
+        high for the wrong reason -- an imbalanced classifier that has collapsed to the
+        majority class, or a correlation computed on predictions that have barely moved.
+        Only meaningful for ``selection: best_min``.
+        """
+        value = int(self.training.get("selection_min_epoch", DEFAULT_SELECTION_MIN_EPOCH))
+        if value < 1:
+            raise ValueError(f"training.selection_min_epoch must be >= 1, got {value}")
+        return value
 
     @property
     def seed(self) -> int:
@@ -198,6 +234,21 @@ class RunConfig:
         Written by `preprocess.py --task`; picks the metrics and how logits become predictions.
         """
         return self.data.get("task_kind")
+
+    @property
+    def target_scaler(self) -> tuple[Any, Any] | None:
+        """``(mean, std)`` per label column for a standardised regression task, else None.
+
+        Written by `preprocess.py --task` from the TRAIN split only. Training runs on the
+        standardised targets; metrics and prediction files are converted back through this,
+        so everything a run reports is in the original units.
+        """
+        scaler = self.data.get("target_scaler")
+        if not scaler:
+            return None
+        import numpy as np  # noqa: PLC0415
+
+        return np.asarray(scaler["mean"], dtype=np.float64), np.asarray(scaler["std"], dtype=np.float64)
 
     @property
     def params(self) -> str:
